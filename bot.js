@@ -69,6 +69,15 @@ async function updatePrice() {
   }
 }
 
+async function getTraderWallet(txHash) {
+  try {
+    const tx = await provider.getTransaction(txHash);
+    return tx.from;
+  } catch (e) {
+    return null;
+  }
+}
+
 function formatMessage(t, isBuy, wetnAmount, tokenAmount, txHash, wallet) {
   const usdValue = wetnAmount * etnPriceUsd;
   const usdPricePerToken = tokenAmount > 0 ? usdValue / tokenAmount : 0;
@@ -101,16 +110,17 @@ function formatMessage(t, isBuy, wetnAmount, tokenAmount, txHash, wallet) {
 }
 
 async function sendTradeMessage(message, isBuy, symbol) {
+  const opts = { parse_mode: "Markdown", disable_web_page_preview: true };
   try {
     if (isBuy && symbol === "CLUB") {
       await bot.sendAnimation(CHAT_ID, BUY_GIF_URL, { caption: message, parse_mode: "Markdown" });
     } else {
-      await bot.sendMessage(CHAT_ID, message, { parse_mode: "Markdown" });
+      await bot.sendMessage(CHAT_ID, message, opts);
     }
   } catch (err) {
     console.error("Telegram send failed, falling back to text:", err.message);
     try {
-      await bot.sendMessage(CHAT_ID, message, { parse_mode: "Markdown" });
+      await bot.sendMessage(CHAT_ID, message, opts);
     } catch (err2) {
       console.error("Telegram fallback also failed:", err2.message);
     }
@@ -123,7 +133,7 @@ async function checkTokenV2(t, fromBlock, toBlock) {
   const dec = tokenDecimals[t.symbol] || 18;
 
   for (const event of events) {
-    const { amount0In, amount1In, amount0Out, amount1Out, to } = event.args;
+    const { amount0In, amount1In, amount0Out, amount1Out } = event.args;
     const wetnIn = t.wetnIsToken0 ? amount0In : amount1In;
     const wetnOut = t.wetnIsToken0 ? amount0Out : amount1Out;
     const tokenIn = t.wetnIsToken0 ? amount1In : amount0In;
@@ -134,7 +144,10 @@ async function checkTokenV2(t, fromBlock, toBlock) {
     const tokenAmount = Number(ethers.formatUnits(isBuy ? tokenOut : tokenIn, dec));
     if (tokenAmount === 0) continue;
 
-    const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, event.transactionHash, to);
+    const wallet = await getTraderWallet(event.transactionHash);
+    if (!wallet) continue;
+
+    const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet);
     await sendTradeMessage(message, isBuy, t.symbol);
     console.log("Posted:", t.symbol, isBuy ? "BUY" : "SELL", event.transactionHash);
   }
@@ -146,7 +159,7 @@ async function checkTokenV3(t, fromBlock, toBlock) {
   const dec = tokenDecimals[t.symbol] || 18;
 
   for (const event of events) {
-    const { amount0, amount1, recipient } = event.args;
+    const { amount0, amount1 } = event.args;
     const wetnRaw = t.wetnIsToken0 ? amount0 : amount1;
     const tokenRaw = t.wetnIsToken0 ? amount1 : amount0;
 
@@ -155,7 +168,10 @@ async function checkTokenV3(t, fromBlock, toBlock) {
     const tokenAmount = Number(ethers.formatUnits(tokenRaw < 0n ? -tokenRaw : tokenRaw, dec));
     if (tokenAmount === 0) continue;
 
-    const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, event.transactionHash, recipient);
+    const wallet = await getTraderWallet(event.transactionHash);
+    if (!wallet) continue;
+
+    const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet);
     await sendTradeMessage(message, isBuy, t.symbol);
     console.log("Posted:", t.symbol, isBuy ? "BUY" : "SELL", event.transactionHash);
   }
