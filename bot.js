@@ -19,7 +19,7 @@ process.on("uncaughtException", (err) => {
 });
 
 const tokens = [
-  { symbol: "CLUB", address: "0xC9FC4AB00911793D99b5c7Bd01f01203C21D4131", pool: "0x86566c3c78424e3c3c2aDb274FAB551B7262E0ca", version: "v3", wetnIsToken0: true },
+  { symbol: "CLUB", address: "0xC9FC4AB00911793D99b5c7Bd01f01203C21D4131", pool: "0x86566c3c78424e3c3c2aDb274FAB551B7262E0ca", version: "v3", wetnIsToken0: true, website: "https://planetetn.org/profile/4-etn-club-ninjars", websiteLabel: "PlanetETN: CLUB Website" },
   { symbol: "BOLT", address: "0x043fAa1b5C5FC9a7dc35171f290c29ECDE0cCff1", pool: "0x4D2b867FCa568B5DC6367646811FaA4ED3C0520F", version: "v2", wetnIsToken0: false },
   { symbol: "DYNO", address: "0xEe432C220273e4F949007B4c1946562826Efa055", pool: "0xf24c6096E36EB242DdFc3B672Ed9d1f62aB33366", version: "v2", wetnIsToken0: true },
   { symbol: "PANDY", address: "0xc20d02538368D8F7deBeAeB99D9a8b4d4D1DDC1C", pool: "0x0d138f0bf5C7Bb25A078F791E5802776656e82D3", version: "v2", wetnIsToken0: true },
@@ -37,7 +37,10 @@ const erc20Abi = ["function decimals() view returns (uint8)"];
 let etnPriceUsd = 0.0008;
 let lastBlock = null;
 const tokenDecimals = {};
-const lastPrices = {};
+
+function fmt(num, decimals) {
+  return num.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
 
 async function loadDecimals() {
   for (const t of tokens) {
@@ -66,29 +69,35 @@ async function updatePrice() {
   }
 }
 
-function formatMessage(symbol, isBuy, wetnAmount, tokenAmount, price, txHash, wallet) {
+function formatMessage(t, isBuy, wetnAmount, tokenAmount, txHash, wallet) {
   const usdValue = wetnAmount * etnPriceUsd;
-  const label = isBuy ? `🟢 ${symbol} BUY` : `🔴 ${symbol} SELL`;
+  const usdPricePerToken = tokenAmount > 0 ? usdValue / tokenAmount : 0;
+  const circles = (isBuy ? "🟢" : "🔴").repeat(10);
+  const label = isBuy ? "BUY" : "SELL";
+  const roleLabel = isBuy ? "Buyer" : "Seller";
+
   const txLink = "https://blockexplorer.electroneum.com/tx/" + txHash;
+  const walletLink = "https://blockexplorer.electroneum.com/address/" + wallet;
   const walletShort = wallet.slice(0, 6) + "..." + wallet.slice(-4);
 
-  const prevPrice = lastPrices[symbol];
-  const priceChange = prevPrice ? ((price - prevPrice) / prevPrice * 100) : 0;
-  lastPrices[symbol] = price;
-  const priceChangeStr = priceChange > 0 ? `+${priceChange.toFixed(2)}%` : `${priceChange.toFixed(2)}%`;
-  const sizeCategory = usdValue > 100 ? "🔥 LARGE" : usdValue > 50 ? "📈 MEDIUM" : "📊 SMALL";
+  const buyLink = `https://app.electroswap.io/swap?outputCurrency=${t.address}`;
+  const liveTxsLink = `https://blockexplorer.electroneum.com/address/${t.pool}`;
 
-  return `━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `${label} ${sizeCategory}\n` +
+  let msg = `${circles}\n` +
+    `*${t.symbol} ${label}* ($${fmt(usdValue, 2)})\n\n` +
+    `💰 *${isBuy ? "Paid" : "Received"}:* ${fmt(wetnAmount, 4)} WETN\n` +
+    `🔢 *Amount:* ${fmt(tokenAmount, 6)} ${t.symbol}\n` +
+    `💵 *${t.symbol} Price:* $${fmt(usdPricePerToken, 6)}\n` +
+    `👤 *${roleLabel}:* [${walletShort}](${walletLink})\n` +
+    `🔗 [View Transaction](${txLink})\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `💵 *Trade Value:* $${usdValue.toFixed(2)}\n` +
-    `💰 *WETN ${isBuy ? "Paid" : "Received"}:* ${wetnAmount.toFixed(4)}\n` +
-    `🪙 *${symbol} ${isBuy ? "Received" : "Sent"}:* ${tokenAmount.toFixed(6)}\n\n` +
-    `📊 *Price & Metrics*\n` +
-    `├ Current: ${price.toFixed(6)} WETN/${symbol}\n` +
-    `├ Change: ${priceChangeStr}\n` +
-    `├ Wallet: \`${walletShort}\`\n\n` +
-    `🔗 [View on Explorer](${txLink})`;
+    `💵 [Buy ${t.symbol}](${buyLink}) | ⚡ [Live Txs](${liveTxsLink})`;
+
+  if (t.website) {
+    msg += `\n🌎 [${t.websiteLabel}](${t.website})`;
+  }
+
+  return msg;
 }
 
 async function sendTradeMessage(message, isBuy, symbol) {
@@ -124,9 +133,8 @@ async function checkTokenV2(t, fromBlock, toBlock) {
     const wetnAmount = Number(ethers.formatUnits(isBuy ? wetnIn : wetnOut, 18));
     const tokenAmount = Number(ethers.formatUnits(isBuy ? tokenOut : tokenIn, dec));
     if (tokenAmount === 0) continue;
-    const price = wetnAmount / tokenAmount;
 
-    const message = formatMessage(t.symbol, isBuy, wetnAmount, tokenAmount, price, event.transactionHash, to);
+    const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, event.transactionHash, to);
     await sendTradeMessage(message, isBuy, t.symbol);
     console.log("Posted:", t.symbol, isBuy ? "BUY" : "SELL", event.transactionHash);
   }
@@ -146,9 +154,8 @@ async function checkTokenV3(t, fromBlock, toBlock) {
     const wetnAmount = Number(ethers.formatUnits(wetnRaw < 0n ? -wetnRaw : wetnRaw, 18));
     const tokenAmount = Number(ethers.formatUnits(tokenRaw < 0n ? -tokenRaw : tokenRaw, dec));
     if (tokenAmount === 0) continue;
-    const price = wetnAmount / tokenAmount;
 
-    const message = formatMessage(t.symbol, isBuy, wetnAmount, tokenAmount, price, event.transactionHash, sender);
+    const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, event.transactionHash, sender);
     await sendTradeMessage(message, isBuy, t.symbol);
     console.log("Posted:", t.symbol, isBuy ? "BUY" : "SELL", event.transactionHash);
   }
