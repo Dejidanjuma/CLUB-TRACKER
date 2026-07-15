@@ -146,7 +146,7 @@ async function checkTokenV3(t, fromBlock, toBlock) {
   const dec = tokenDecimals[t.symbol] || 18;
 
   for (const event of events) {
-    const { amount0, amount1, sender } = event.args;
+    const { amount0, amount1, recipient } = event.args;
     const wetnRaw = t.wetnIsToken0 ? amount0 : amount1;
     const tokenRaw = t.wetnIsToken0 ? amount1 : amount0;
 
@@ -155,7 +155,7 @@ async function checkTokenV3(t, fromBlock, toBlock) {
     const tokenAmount = Number(ethers.formatUnits(tokenRaw < 0n ? -tokenRaw : tokenRaw, dec));
     if (tokenAmount === 0) continue;
 
-    const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, event.transactionHash, sender);
+    const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, event.transactionHash, recipient);
     await sendTradeMessage(message, isBuy, t.symbol);
     console.log("Posted:", t.symbol, isBuy ? "BUY" : "SELL", event.transactionHash);
   }
