@@ -16,17 +16,20 @@ const pool = new ethers.Contract(POOL, poolAbi, provider);
 const bot = new TelegramBot(BOT_TOKEN, { polling: false });
 
 let lastBlock = null;
-let etnPriceUsd = 0;
+let etnPriceUsd = 0.0008;
 let lastPrice = null;
 
 async function updatePrice() {
   try {
-    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=electroneum&vs_currencies=usd");
+    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=electroneum&vs_currencies=usd", { timeout: 5000 });
+    if (!res.ok) throw new Error("API returned " + res.status);
     const data = await res.json();
-    etnPriceUsd = data.electroneum.usd;
-    console.log("ETN price updated:", etnPriceUsd);
+    if (data.electroneum && data.electroneum.usd) {
+      etnPriceUsd = data.electroneum.usd;
+      console.log("ETN price updated:", etnPriceUsd);
+    }
   } catch (err) {
-    console.error("Price fetch failed:", err.message);
+    console.log("Price fetch skipped (using cached):", etnPriceUsd);
   }
 }
 
@@ -84,7 +87,7 @@ async function checkSwaps() {
 
 console.log("Watching CLUB/WETN pool (polling every 10s)...");
 updatePrice();
-setInterval(updatePrice, 60000);
+setInterval(updatePrice, 120000);
 checkSwaps();
 setInterval(checkSwaps, 10000);
 
