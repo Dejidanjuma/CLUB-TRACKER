@@ -17,6 +17,7 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: false });
 
 let lastBlock = null;
 let etnPriceUsd = 0;
+let lastPrice = null;
 
 async function updatePrice() {
   try {
@@ -47,17 +48,29 @@ async function checkSwaps() {
       const clubAmount = Number(ethers.formatUnits(amount1 < 0n ? -amount1 : amount1, 18));
       const price = wetnAmount / clubAmount;
       const usdValue = wetnAmount * etnPriceUsd;
-
+      
       const isBuy = amount1 < 0n;
-      const label = isBuy ? "CLUB BUY" : "CLUB SELL";
-      const emojiBar = (isBuy ? "🟢" : "🔴").repeat(10);
+      const priceChange = lastPrice ? ((price - lastPrice) / lastPrice * 100) : 0;
+      lastPrice = price;
+      
+      const label = isBuy ? "🟢 CLUB BUY" : "🔴 CLUB SELL";
       const txLink = "https://blockexplorer.electroneum.com/tx/" + event.transactionHash;
+      const walletTruncated = event.args.sender.slice(0, 6) + "..." + event.args.sender.slice(-4);
 
-      const message = emojiBar + "\n*" + label + "* ($" + usdValue.toFixed(2) + ")\n\n" +
-        "💰 " + (isBuy ? "Paid" : "Received") + ": " + wetnAmount.toFixed(4) + " WETN\n" +
-        "🔢 Amount: " + clubAmount.toFixed(6) + " CLUB\n" +
-        "💵 CLUB Price: " + price.toFixed(6) + " WETN\n" +
-        "🔗 [View Transaction](" + txLink + ")";
+      const priceChangeStr = priceChange > 0 ? `+${priceChange.toFixed(2)}%` : `${priceChange.toFixed(2)}%`;
+      const sizeCategory = usdValue > 100 ? "🔥 LARGE" : usdValue > 50 ? "📈 MEDIUM" : "📊 SMALL";
+
+      const message = `━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `${label} ${sizeCategory}\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `💵 *Trade Value:* $${usdValue.toFixed(2)}\n` +
+        `💰 *WETN ${isBuy ? "Paid" : "Received"}:* ${wetnAmount.toFixed(4)}\n` +
+        `🪙 *CLUB ${isBuy ? "Received" : "Sent"}:* ${clubAmount.toFixed(6)}\n\n` +
+        `📊 *Price & Metrics*\n` +
+        `├ Current: ${price.toFixed(6)} WETN/CLUB\n` +
+        `├ Change: ${priceChangeStr}\n` +
+        `├ Wallet: \`${walletTruncated}\`\n\n` +
+        `🔗 [View on Explorer](${txLink})`;
 
       await bot.sendMessage(CHAT_ID, message, { parse_mode: "Markdown" });
       console.log("Posted:", label, event.transactionHash);
