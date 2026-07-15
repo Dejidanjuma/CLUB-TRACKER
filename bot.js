@@ -11,6 +11,13 @@ const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/
 const provider = new ethers.JsonRpcProvider(RPC, { chainId: 52014, name: "electroneum" });
 const bot = new TelegramBot(BOT_TOKEN, { polling: false });
 
+process.on("unhandledRejection", (reason) => {
+  console.error("UNHANDLED REJECTION:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("UNCAUGHT EXCEPTION:", err);
+});
+
 const tokens = [
   { symbol: "CLUB", address: "0xC9FC4AB00911793D99b5c7Bd01f01203C21D4131", pool: "0x86566c3c78424e3c3c2aDb274FAB551B7262E0ca", version: "v3", wetnIsToken0: true },
   { symbol: "BOLT", address: "0x043fAa1b5C5FC9a7dc35171f290c29ECDE0cCff1", pool: "0x4D2b867FCa568B5DC6367646811FaA4ED3C0520F", version: "v2", wetnIsToken0: false },
@@ -84,16 +91,20 @@ function formatMessage(symbol, isBuy, wetnAmount, tokenAmount, price, txHash, wa
     `🔗 [View on Explorer](${txLink})`;
 }
 
-async function sendTradeMessage(message, isBuy) {
+async function sendTradeMessage(message, isBuy, symbol) {
   try {
-    if (isBuy) {
+    if (isBuy && symbol === "CLUB") {
       await bot.sendAnimation(CHAT_ID, BUY_GIF_URL, { caption: message, parse_mode: "Markdown" });
     } else {
       await bot.sendMessage(CHAT_ID, message, { parse_mode: "Markdown" });
     }
   } catch (err) {
     console.error("Telegram send failed, falling back to text:", err.message);
-    await bot.sendMessage(CHAT_ID, message, { parse_mode: "Markdown" });
+    try {
+      await bot.sendMessage(CHAT_ID, message, { parse_mode: "Markdown" });
+    } catch (err2) {
+      console.error("Telegram fallback also failed:", err2.message);
+    }
   }
 }
 
@@ -116,7 +127,7 @@ async function checkTokenV2(t, fromBlock, toBlock) {
     const price = wetnAmount / tokenAmount;
 
     const message = formatMessage(t.symbol, isBuy, wetnAmount, tokenAmount, price, event.transactionHash, to);
-    await sendTradeMessage(message, isBuy);
+    await sendTradeMessage(message, isBuy, t.symbol);
     console.log("Posted:", t.symbol, isBuy ? "BUY" : "SELL", event.transactionHash);
   }
 }
@@ -138,7 +149,7 @@ async function checkTokenV3(t, fromBlock, toBlock) {
     const price = wetnAmount / tokenAmount;
 
     const message = formatMessage(t.symbol, isBuy, wetnAmount, tokenAmount, price, event.transactionHash, sender);
-    await sendTradeMessage(message, isBuy);
+    await sendTradeMessage(message, isBuy, t.symbol);
     console.log("Posted:", t.symbol, isBuy ? "BUY" : "SELL", event.transactionHash);
   }
 }
@@ -151,6 +162,7 @@ async function checkAllSwaps() {
       console.log("Starting from block", currentBlock);
       return;
     }
+    console.log(`Heartbeat: lastBlock=${lastBlock} currentBlock=${currentBlock}`);
     if (currentBlock <= lastBlock) return;
 
     for (const t of tokens) {
