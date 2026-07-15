@@ -6,6 +6,7 @@ const RPC = "https://rpc.ankr.com/electroneum";
 const WETN = "0x138DAFbDA0CCB3d8E39C19edb0510Fc31b7C1c77";
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
+const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.MP4";
 
 const provider = new ethers.JsonRpcProvider(RPC, { chainId: 52014, name: "electroneum" });
 const bot = new TelegramBot(BOT_TOKEN, { polling: false });
@@ -83,6 +84,19 @@ function formatMessage(symbol, isBuy, wetnAmount, tokenAmount, price, txHash, wa
     `🔗 [View on Explorer](${txLink})`;
 }
 
+async function sendTradeMessage(message, isBuy) {
+  try {
+    if (isBuy) {
+      await bot.sendAnimation(CHAT_ID, BUY_GIF_URL, { caption: message, parse_mode: "Markdown" });
+    } else {
+      await bot.sendMessage(CHAT_ID, message, { parse_mode: "Markdown" });
+    }
+  } catch (err) {
+    console.error("Telegram send failed, falling back to text:", err.message);
+    await bot.sendMessage(CHAT_ID, message, { parse_mode: "Markdown" });
+  }
+}
+
 async function checkTokenV2(t, fromBlock, toBlock) {
   const pool = new ethers.Contract(t.pool, v2Abi, provider);
   const events = await pool.queryFilter("Swap", fromBlock, toBlock);
@@ -102,7 +116,7 @@ async function checkTokenV2(t, fromBlock, toBlock) {
     const price = wetnAmount / tokenAmount;
 
     const message = formatMessage(t.symbol, isBuy, wetnAmount, tokenAmount, price, event.transactionHash, to);
-    await bot.sendMessage(CHAT_ID, message, { parse_mode: "Markdown" });
+    await sendTradeMessage(message, isBuy);
     console.log("Posted:", t.symbol, isBuy ? "BUY" : "SELL", event.transactionHash);
   }
 }
@@ -124,7 +138,7 @@ async function checkTokenV3(t, fromBlock, toBlock) {
     const price = wetnAmount / tokenAmount;
 
     const message = formatMessage(t.symbol, isBuy, wetnAmount, tokenAmount, price, event.transactionHash, sender);
-    await bot.sendMessage(CHAT_ID, message, { parse_mode: "Markdown" });
+    await sendTradeMessage(message, isBuy);
     console.log("Posted:", t.symbol, isBuy ? "BUY" : "SELL", event.transactionHash);
   }
 }
