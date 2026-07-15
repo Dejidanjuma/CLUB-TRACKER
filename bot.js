@@ -3,26 +3,51 @@ const TelegramBot = require("node-telegram-bot-api").TelegramBot;
 const http = require("http");
 
 const RPC = "https://rpc.ankr.com/electroneum";
-const POOL = "0x86566c3c78424e3c3c2aDb274FAB551B7262E0ca";
+const WETN = "0x138DAFbDA0CCB3d8E39C19edb0510Fc31b7C1c77";
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 
-const poolAbi = [
-  "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)"
-];
-
 const provider = new ethers.JsonRpcProvider(RPC, { chainId: 52014, name: "electroneum" });
-const pool = new ethers.Contract(POOL, poolAbi, provider);
 const bot = new TelegramBot(BOT_TOKEN, { polling: false });
 
-let lastBlock = null;
+const tokens = [
+  { symbol: "CLUB", address: "0xC9FC4AB00911793D99b5c7Bd01f01203C21D4131", pool: "0x86566c3c78424e3c3c2aDb274FAB551B7262E0ca", version: "v3", wetnIsToken0: true },
+  { symbol: "BOLT", address: "0x043fAa1b5C5FC9a7dc35171f290c29ECDE0cCff1", pool: "0x4D2b867FCa568B5DC6367646811FaA4ED3C0520F", version: "v2", wetnIsToken0: false },
+  { symbol: "DYNO", address: "0xEe432C220273e4F949007B4c1946562826Efa055", pool: "0xf24c6096E36EB242DdFc3B672Ed9d1f62aB33366", version: "v2", wetnIsToken0: true },
+  { symbol: "PANDY", address: "0xc20d02538368D8F7deBeAeB99D9a8b4d4D1DDC1C", pool: "0x0d138f0bf5C7Bb25A078F791E5802776656e82D3", version: "v2", wetnIsToken0: true },
+  { symbol: "DCNT", address: "0xE74e4E7A064310466f3bdBd3F3Ce4e8c8F7CF1d5", pool: "0x6cDF9e7c8177BFCEc940E3f195ACf5a9C04ae3CD", version: "v3", wetnIsToken0: true },
+  { symbol: "SPIKE", address: "0x9bC7ab566e50A915016aE165A9c58Dad4e4828a1", pool: "0xa5Fb801c30FDC9b0532583BF02Df15E36e7b1a16", version: "v2", wetnIsToken0: true },
+  { symbol: "USDC", address: "0x3187deAd7A2Bd6770F5Fe81495D1B715926AAe6e", pool: "0x2cB2Af7aef7AB4cc3228F9c55EE8542Cb323Ad8A", version: "v3", wetnIsToken0: true },
+  { symbol: "USDT", address: "0x48E722f1458b253c2FB0E573F939318D7Dbd54e7", pool: "0x0CC625331C9b22D94fEF29d462aB1c9B26dFF196", version: "v3", wetnIsToken0: true },
+  { symbol: "CORE", address: "0x309B916b3A90cb3E071697Ea9680e9217A30066f", pool: "0xc3FE6f98765493aB62AD87C9B5022Ff2FAA2e98D", version: "v2", wetnIsToken0: true }
+];
+
+const v2Abi = ["event Swap(address indexed sender, uint amount0In, uint amount1In, uint amount0Out, uint amount1Out, address indexed to)"];
+const v3Abi = ["event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)"];
+const erc20Abi = ["function decimals() view returns (uint8)"];
+
 let etnPriceUsd = 0.0008;
-let lastPrice = null;
+let lastBlock = null;
+const tokenDecimals = {};
+const lastPrices = {};
+
+async function loadDecimals() {
+  for (const t of tokens) {
+    try {
+      const c = new ethers.Contract(t.address, erc20Abi, provider);
+      tokenDecimals[t.symbol] = await c.decimals();
+      console.log(`${t.symbol} decimals: ${tokenDecimals[t.symbol]}`);
+    } catch (e) {
+      tokenDecimals[t.symbol] = 18;
+      console.log(`${t.symbol} decimals fallback to 18`);
+    }
+  }
+}
 
 async function updatePrice() {
   try {
-    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=electroneum&vs_currencies=usd", { timeout: 5000 });
-    if (!res.ok) throw new Error("API returned " + res.status);
+    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=electroneum&vs_currencies=usd");
+    if (!res.ok) throw new Error("bad status");
     const data = await res.json();
     if (data.electroneum && data.electroneum.usd) {
       etnPriceUsd = data.electroneum.usd;
@@ -33,7 +58,78 @@ async function updatePrice() {
   }
 }
 
-async function checkSwaps() {
+function formatMessage(symbol, isBuy, wetnAmount, tokenAmount, price, txHash, wallet) {
+  const usdValue = wetnAmount * etnPriceUsd;
+  const label = isBuy ? `🟢 ${symbol} BUY` : `🔴 ${symbol} SELL`;
+  const txLink = "https://blockexplorer.electroneum.com/tx/" + txHash;
+  const walletShort = wallet.slice(0, 6) + "..." + wallet.slice(-4);
+
+  const prevPrice = lastPrices[symbol];
+  const priceChange = prevPrice ? ((price - prevPrice) / prevPrice * 100) : 0;
+  lastPrices[symbol] = price;
+  const priceChangeStr = priceChange > 0 ? `+${priceChange.toFixed(2)}%` : `${priceChange.toFixed(2)}%`;
+  const sizeCategory = usdValue > 100 ? "🔥 LARGE" : usdValue > 50 ? "📈 MEDIUM" : "📊 SMALL";
+
+  return `━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `${label} ${sizeCategory}\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `💵 *Trade Value:* $${usdValue.toFixed(2)}\n` +
+    `💰 *WETN ${isBuy ? "Paid" : "Received"}:* ${wetnAmount.toFixed(4)}\n` +
+    `🪙 *${symbol} ${isBuy ? "Received" : "Sent"}:* ${tokenAmount.toFixed(6)}\n\n` +
+    `📊 *Price & Metrics*\n` +
+    `├ Current: ${price.toFixed(6)} WETN/${symbol}\n` +
+    `├ Change: ${priceChangeStr}\n` +
+    `├ Wallet: \`${walletShort}\`\n\n` +
+    `🔗 [View on Explorer](${txLink})`;
+}
+
+async function checkTokenV2(t, fromBlock, toBlock) {
+  const pool = new ethers.Contract(t.pool, v2Abi, provider);
+  const events = await pool.queryFilter("Swap", fromBlock, toBlock);
+  const dec = tokenDecimals[t.symbol] || 18;
+
+  for (const event of events) {
+    const { amount0In, amount1In, amount0Out, amount1Out, to } = event.args;
+    const wetnIn = t.wetnIsToken0 ? amount0In : amount1In;
+    const wetnOut = t.wetnIsToken0 ? amount0Out : amount1Out;
+    const tokenIn = t.wetnIsToken0 ? amount1In : amount0In;
+    const tokenOut = t.wetnIsToken0 ? amount1Out : amount0Out;
+
+    const isBuy = wetnIn > 0n;
+    const wetnAmount = Number(ethers.formatUnits(isBuy ? wetnIn : wetnOut, 18));
+    const tokenAmount = Number(ethers.formatUnits(isBuy ? tokenOut : tokenIn, dec));
+    if (tokenAmount === 0) continue;
+    const price = wetnAmount / tokenAmount;
+
+    const message = formatMessage(t.symbol, isBuy, wetnAmount, tokenAmount, price, event.transactionHash, to);
+    await bot.sendMessage(CHAT_ID, message, { parse_mode: "Markdown" });
+    console.log("Posted:", t.symbol, isBuy ? "BUY" : "SELL", event.transactionHash);
+  }
+}
+
+async function checkTokenV3(t, fromBlock, toBlock) {
+  const pool = new ethers.Contract(t.pool, v3Abi, provider);
+  const events = await pool.queryFilter("Swap", fromBlock, toBlock);
+  const dec = tokenDecimals[t.symbol] || 18;
+
+  for (const event of events) {
+    const { amount0, amount1, sender } = event.args;
+    const wetnRaw = t.wetnIsToken0 ? amount0 : amount1;
+    const tokenRaw = t.wetnIsToken0 ? amount1 : amount0;
+
+    const isBuy = tokenRaw < 0n;
+    const wetnAmount = Number(ethers.formatUnits(wetnRaw < 0n ? -wetnRaw : wetnRaw, 18));
+    const tokenAmount = Number(ethers.formatUnits(tokenRaw < 0n ? -tokenRaw : tokenRaw, dec));
+    if (tokenAmount === 0) continue;
+    const price = wetnAmount / tokenAmount;
+
+    const message = formatMessage(t.symbol, isBuy, wetnAmount, tokenAmount, price, event.transactionHash, sender);
+    await bot.sendMessage(CHAT_ID, message, { parse_mode: "Markdown" });
+    console.log("Posted:", t.symbol, isBuy ? "BUY" : "SELL", event.transactionHash);
+  }
+}
+
+async function checkAllSwaps() {
   try {
     const currentBlock = await provider.getBlockNumber();
     if (lastBlock === null) {
@@ -43,53 +139,35 @@ async function checkSwaps() {
     }
     if (currentBlock <= lastBlock) return;
 
-    const events = await pool.queryFilter("Swap", lastBlock + 1, currentBlock);
-
-    for (const event of events) {
-      const { amount0, amount1 } = event.args;
-      const wetnAmount = Number(ethers.formatUnits(amount0 < 0n ? -amount0 : amount0, 18));
-      const clubAmount = Number(ethers.formatUnits(amount1 < 0n ? -amount1 : amount1, 18));
-      const price = wetnAmount / clubAmount;
-      const usdValue = wetnAmount * etnPriceUsd;
-      
-      const isBuy = amount1 < 0n;
-      const priceChange = lastPrice ? ((price - lastPrice) / lastPrice * 100) : 0;
-      lastPrice = price;
-      
-      const label = isBuy ? "🟢 CLUB BUY" : "🔴 CLUB SELL";
-      const txLink = "https://blockexplorer.electroneum.com/tx/" + event.transactionHash;
-      const walletTruncated = event.args.sender.slice(0, 6) + "..." + event.args.sender.slice(-4);
-
-      const priceChangeStr = priceChange > 0 ? `+${priceChange.toFixed(2)}%` : `${priceChange.toFixed(2)}%`;
-      const sizeCategory = usdValue > 100 ? "🔥 LARGE" : usdValue > 50 ? "📈 MEDIUM" : "📊 SMALL";
-
-      const message = `━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `${label} ${sizeCategory}\n` +
-        `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-        `💵 *Trade Value:* $${usdValue.toFixed(2)}\n` +
-        `💰 *WETN ${isBuy ? "Paid" : "Received"}:* ${wetnAmount.toFixed(4)}\n` +
-        `🪙 *CLUB ${isBuy ? "Received" : "Sent"}:* ${clubAmount.toFixed(6)}\n\n` +
-        `📊 *Price & Metrics*\n` +
-        `├ Current: ${price.toFixed(6)} WETN/CLUB\n` +
-        `├ Change: ${priceChangeStr}\n` +
-        `├ Wallet: \`${walletTruncated}\`\n\n` +
-        `🔗 [View on Explorer](${txLink})`;
-
-      await bot.sendMessage(CHAT_ID, message, { parse_mode: "Markdown" });
-      console.log("Posted:", label, event.transactionHash);
+    for (const t of tokens) {
+      try {
+        if (t.version === "v2") {
+          await checkTokenV2(t, lastBlock + 1, currentBlock);
+        } else {
+          await checkTokenV3(t, lastBlock + 1, currentBlock);
+        }
+      } catch (err) {
+        console.error(`Error checking ${t.symbol}:`, err.message);
+      }
     }
 
     lastBlock = currentBlock;
   } catch (err) {
-    console.error("Error checking swaps:", err.message);
+    console.error("Error in checkAllSwaps:", err.message);
   }
 }
 
-console.log("Watching CLUB/WETN pool (polling every 10s)...");
-updatePrice();
-setInterval(updatePrice, 120000);
-checkSwaps();
-setInterval(checkSwaps, 10000);
+async function start() {
+  console.log("Loading token decimals...");
+  await loadDecimals();
+  console.log("Watching", tokens.length, "tokens (polling every 10s)...");
+  await updatePrice();
+  setInterval(updatePrice, 120000);
+  await checkAllSwaps();
+  setInterval(checkAllSwaps, 10000);
+}
+
+start();
 
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
