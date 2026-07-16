@@ -174,18 +174,20 @@ async function checkTokenV3(t, fromBlock, toBlock) {
 async function checkAllSwaps() {
   try {
     const currentBlock = await provider.getBlockNumber();
-    const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 100;
+    const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 200;
     console.log(`Checking blocks ${fromBlock} to ${currentBlock}`);
 
     for (const t of tokens) {
       try {
         if (t.version === "v2") await checkTokenV2(t, fromBlock, currentBlock);
         else await checkTokenV3(t, fromBlock, currentBlock);
-      } catch (e) {}
+      } catch (e) {
+        console.error(`Error checking ${t.symbol}:`, e.message);
+      }
     }
     lastBlock = currentBlock;
   } catch (e) {
-    console.error("Check error:", e.message);
+    console.error("CheckAllSwaps error:", e.message);
   }
 }
 
@@ -194,7 +196,7 @@ async function start() {
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
-  setInterval(checkAllSwaps, 4000); // faster polling
+  setInterval(checkAllSwaps, 4000);
   await checkAllSwaps();
 }
 
