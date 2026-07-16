@@ -48,7 +48,6 @@ async function loadDecimals() {
     try {
       const c = new ethers.Contract(t.address, erc20Abi, provider);
       tokenDecimals[t.symbol] = await c.decimals();
-      console.log(t.symbol + " decimals: " + tokenDecimals[t.symbol]);
     } catch (e) {
       tokenDecimals[t.symbol] = 18;
     }
@@ -114,7 +113,7 @@ async function sendTradeMessage(message, isBuy, symbol) {
   }
 }
 
-// ================== FIXED V2 FUNCTION (Fixes BOLT buys) ==================
+// FIXED V2 with debugging for BOLT
 async function checkTokenV2(t, fromBlock, toBlock) {
   const pool = new ethers.Contract(t.pool, v2Abi, provider);
   const events = await pool.queryFilter("Swap", fromBlock, toBlock);
@@ -133,19 +132,29 @@ async function checkTokenV2(t, fromBlock, toBlock) {
       wetnAmount = Number(ethers.formatUnits(isBuy ? a0In : a0Out, 18));
       tokenAmount = Number(ethers.formatUnits(isBuy ? a1Out : a1In, dec));
     } else {
+      // BOLT debugging logs
+      console.log(`🔍 BOLT SWAP EVENT: a0In=${a0In}, a1In=${a1In}, a0Out=${a0Out}, a1Out=${a1Out}`);
+      
       isBuy = a1In > 0n;
       wetnAmount = Number(ethers.formatUnits(isBuy ? a1In : a1Out, 18));
       tokenAmount = Number(ethers.formatUnits(isBuy ? a0Out : a0In, dec));
     }
 
-    if (tokenAmount <= 0 || wetnAmount <= 0) continue;
+    if (tokenAmount <= 0 || wetnAmount <= 0) {
+      console.log(`⏭️ Skipped ${t.symbol} - zero amount`);
+      continue;
+    }
 
     const wallet = await getTraderWallet(event.transactionHash);
-    if (!wallet) continue;
+    if (!wallet) {
+      console.log(`⚠️ No wallet for ${t.symbol}`);
+      continue;
+    }
 
     const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet);
     await sendTradeMessage(message, isBuy, t.symbol);
-    console.log("Posted:", t.symbol, isBuy ? "BUY" : "SELL");
+    
+    console.log("✅ POSTED:", t.symbol, isBuy ? "BUY" : "SELL", event.transactionHash);
   }
 }
 
@@ -175,7 +184,7 @@ async function checkTokenV3(t, fromBlock, toBlock) {
 
     const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet);
     await sendTradeMessage(message, isBuy, t.symbol);
-    console.log("Posted:", t.symbol, isBuy ? "BUY" : "SELL");
+    console.log("✅ POSTED:", t.symbol, isBuy ? "BUY" : "SELL");
   }
 }
 
@@ -188,14 +197,19 @@ async function checkAllSwaps() {
       try {
         if (t.version === "v2") await checkTokenV2(t, lastBlock + 1, currentBlock);
         else await checkTokenV3(t, lastBlock + 1, currentBlock);
-      } catch (err) {}
+      } catch (err) {
+        console.error("Error checking", t.symbol, err.message);
+      }
     }
 
     lastBlock = currentBlock;
-  } catch (err) {}
+  } catch (err) {
+    console.error("checkAllSwaps error:", err.message);
+  }
 }
 
 async function start() {
+  console.log("Bot starting...");
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
@@ -208,4 +222,4 @@ start();
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200); res.end("Bot is running");
-}).listen(PORT);
+}).listen(PORT, () => console.log("Health check running"));
