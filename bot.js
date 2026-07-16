@@ -100,9 +100,9 @@ async function sendTradeMessage(message, isBuy, symbol) {
     } else {
       await bot.sendMessage(CHAT_ID, message, opts);
     }
-    console.log(`✅ Telegram sent ${symbol} ${isBuy ? "BUY" : "SELL"}`);
+    console.log(`✅ Sent ${symbol} ${isBuy ? "BUY" : "SELL"}`);
   } catch (err) {
-    console.error("❌ Telegram error:", err.message);
+    console.error("❌ Send failed:", err.message);
   }
 }
 
@@ -118,6 +118,8 @@ async function checkTokenV2(t, fromBlock, toBlock) {
 
     const a0In = event.args[1], a1In = event.args[2], a0Out = event.args[3], a1Out = event.args[4];
 
+    console.log(`🔍 ${t.symbol} Swap: a0In=${a0In} a1In=${a1In} a0Out=${a0Out} a1Out=${a1Out}`);
+
     let isBuy = false, wetnAmount = 0, tokenAmount = 0;
 
     if (t.wetnIsToken0) {
@@ -125,9 +127,7 @@ async function checkTokenV2(t, fromBlock, toBlock) {
       wetnAmount = Number(ethers.formatUnits(isBuy ? a0In : a0Out, 18));
       tokenAmount = Number(ethers.formatUnits(isBuy ? a1Out : a1In, dec));
     } else {
-      if (a1In > 0n && a0Out > 0n) isBuy = true;
-      else if (a0In > 0n && a1Out > 0n) isBuy = false;
-
+      isBuy = a1In > 0n && a0Out > 0n;
       wetnAmount = Number(ethers.formatUnits(isBuy ? a1In : a1Out, 18));
       tokenAmount = Number(ethers.formatUnits(isBuy ? a0Out : a0In, dec));
     }
@@ -154,6 +154,7 @@ async function checkTokenV3(t, fromBlock, toBlock) {
 
     const amount0 = event.args[2];
     const amount1 = event.args[3];
+
     const wetnRaw = t.wetnIsToken0 ? amount0 : amount1;
     const tokenRaw = t.wetnIsToken0 ? amount1 : amount0;
 
@@ -174,20 +175,18 @@ async function checkTokenV3(t, fromBlock, toBlock) {
 async function checkAllSwaps() {
   try {
     const currentBlock = await provider.getBlockNumber();
-    const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 200;
+    const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 150;
     console.log(`Checking blocks ${fromBlock} to ${currentBlock}`);
 
     for (const t of tokens) {
       try {
         if (t.version === "v2") await checkTokenV2(t, fromBlock, currentBlock);
         else await checkTokenV3(t, fromBlock, currentBlock);
-      } catch (e) {
-        console.error(`Error checking ${t.symbol}:`, e.message);
-      }
+      } catch (e) {}
     }
     lastBlock = currentBlock;
   } catch (e) {
-    console.error("CheckAllSwaps error:", e.message);
+    console.error("Check error:", e.message);
   }
 }
 
@@ -196,7 +195,7 @@ async function start() {
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
-  setInterval(checkAllSwaps, 4000);
+  setInterval(checkAllSwaps, 5000);
   await checkAllSwaps();
 }
 
