@@ -102,7 +102,7 @@ async function sendTradeMessage(message, isBuy, symbol) {
     }
     console.log(`✅ Telegram sent ${symbol} ${isBuy ? "BUY" : "SELL"}`);
   } catch (err) {
-    console.error("Telegram failed:", err.message);
+    console.error("❌ Telegram error:", err.message);
   }
 }
 
@@ -174,7 +174,7 @@ async function checkTokenV3(t, fromBlock, toBlock) {
 async function checkAllSwaps() {
   try {
     const currentBlock = await provider.getBlockNumber();
-    const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 50;
+    const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 100;
     console.log(`Checking blocks ${fromBlock} to ${currentBlock}`);
 
     for (const t of tokens) {
@@ -183,7 +183,6 @@ async function checkAllSwaps() {
         else await checkTokenV3(t, fromBlock, currentBlock);
       } catch (e) {}
     }
-
     lastBlock = currentBlock;
   } catch (e) {
     console.error("Check error:", e.message);
@@ -195,7 +194,7 @@ async function start() {
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
-  setInterval(checkAllSwaps, 5000);
+  setInterval(checkAllSwaps, 4000); // faster polling
   await checkAllSwaps();
 }
 
