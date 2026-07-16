@@ -190,21 +190,24 @@ async function checkAllSwaps() {
 }
 
 async function start() {
-  console.log("Bot starting with real-time block listener...");
+  console.log("Bot starting with real-time listener...");
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
 
-  // Real-time listener
   provider.on("block", async (blockNumber) => {
     console.log(`New block detected: ${blockNumber}`);
     await checkAllSwaps();
   });
 
-  // Initial scan
   const current = await provider.getBlockNumber();
   lastBlock = current - 100;
   await checkAllSwaps();
+
+  // Test message after 5 seconds
+  setTimeout(() => {
+    bot.sendMessage(CHAT_ID, "🧪 Test message - TG is connected").catch(err => console.error("Test failed:", err));
+  }, 5000);
 }
 
 start();
