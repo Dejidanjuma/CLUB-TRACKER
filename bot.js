@@ -124,10 +124,8 @@ async function checkTokenV2(t, fromBlock, toBlock) {
       wetnAmount = Number(ethers.formatUnits(isBuy ? a0In : a0Out, 18));
       tokenAmount = Number(ethers.formatUnits(isBuy ? a1Out : a1In, dec));
     } else {
-      // BOLT specific - more ways to detect buy
-      console.log(`🔍 BOLT EVENT Tx:${txHash.slice(0,10)}... a0In=${a0In} a1In=${a1In} a0Out=${a0Out} a1Out=${a1Out}`);
-      
-      if (a1In > 0n && a0Out > 0n) isBuy = true;   // Buy: WETN in, BOLT out
+      // BOLT - robust detection
+      if (a1In > 0n && a0Out > 0n) isBuy = true;   // Buy WETN → BOLT
       else if (a0In > 0n && a1Out > 0n) isBuy = false; // Sell
 
       wetnAmount = Number(ethers.formatUnits(isBuy ? a1In : a1Out, 18));
@@ -141,7 +139,7 @@ async function checkTokenV2(t, fromBlock, toBlock) {
 
     const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, txHash, wallet);
     await sendTradeMessage(message, isBuy, t.symbol);
-    console.log("✅ POSTED", t.symbol, isBuy ? "BUY" : "SELL");
+    console.log("✅ POSTED", t.symbol, isBuy ? "BUY" : "SELL", txHash.slice(0,10));
   }
 }
 
@@ -177,7 +175,7 @@ async function checkTokenV3(t, fromBlock, toBlock) {
 async function checkAllSwaps() {
   try {
     const currentBlock = await provider.getBlockNumber();
-    if (lastBlock === null) lastBlock = currentBlock - 200; // even wider
+    if (lastBlock === null) lastBlock = currentBlock - 300;
 
     for (const t of tokens) {
       try {
@@ -186,7 +184,7 @@ async function checkAllSwaps() {
       } catch (e) {}
     }
     lastBlock = currentBlock;
-  } catch (e) { console.error("Check error:", e.message); }
+  } catch (e) {}
 }
 
 async function start() {
@@ -194,7 +192,7 @@ async function start() {
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
-  setInterval(checkAllSwaps, 5000); // check every 5 seconds
+  setInterval(checkAllSwaps, 6000);
   await checkAllSwaps();
 }
 
