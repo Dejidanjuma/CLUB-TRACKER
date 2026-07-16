@@ -100,8 +100,9 @@ async function sendTradeMessage(message, isBuy, symbol) {
     } else {
       await bot.sendMessage(CHAT_ID, message, opts);
     }
+    console.log(`✅ Telegram sent ${symbol} ${isBuy ? "BUY" : "SELL"}`);
   } catch (err) {
-    try { await bot.sendMessage(CHAT_ID, message, opts); } catch (e) {}
+    console.error("Telegram failed:", err.message);
   }
 }
 
@@ -138,7 +139,6 @@ async function checkTokenV2(t, fromBlock, toBlock) {
 
     const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, txHash, wallet);
     await sendTradeMessage(message, isBuy, t.symbol);
-    console.log("✅ POSTED", t.symbol, isBuy ? "BUY" : "SELL");
   }
 }
 
@@ -174,16 +174,20 @@ async function checkTokenV3(t, fromBlock, toBlock) {
 async function checkAllSwaps() {
   try {
     const currentBlock = await provider.getBlockNumber();
-    if (lastBlock === null) lastBlock = currentBlock - 300;
+    const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 50;
+    console.log(`Checking blocks ${fromBlock} to ${currentBlock}`);
 
     for (const t of tokens) {
       try {
-        if (t.version === "v2") await checkTokenV2(t, lastBlock + 1, currentBlock);
-        else await checkTokenV3(t, lastBlock + 1, currentBlock);
+        if (t.version === "v2") await checkTokenV2(t, fromBlock, currentBlock);
+        else await checkTokenV3(t, fromBlock, currentBlock);
       } catch (e) {}
     }
+
     lastBlock = currentBlock;
-  } catch (e) {}
+  } catch (e) {
+    console.error("Check error:", e.message);
+  }
 }
 
 async function start() {
@@ -191,7 +195,7 @@ async function start() {
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
-  setInterval(checkAllSwaps, 6000);
+  setInterval(checkAllSwaps, 5000);
   await checkAllSwaps();
 }
 
