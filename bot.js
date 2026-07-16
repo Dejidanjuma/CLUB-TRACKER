@@ -174,7 +174,7 @@ async function checkTokenV3(t, fromBlock, toBlock) {
 async function checkAllSwaps() {
   try {
     const currentBlock = await provider.getBlockNumber();
-    const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 150;
+    const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 100;
     console.log(`Checking blocks ${fromBlock} to ${currentBlock}`);
 
     for (const t of tokens) {
@@ -190,11 +190,20 @@ async function checkAllSwaps() {
 }
 
 async function start() {
-  console.log("Bot starting...");
+  console.log("Bot starting with real-time block listener...");
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
-  setInterval(checkAllSwaps, 5000);
+
+  // Real-time listener
+  provider.on("block", async (blockNumber) => {
+    console.log(`New block detected: ${blockNumber}`);
+    await checkAllSwaps();
+  });
+
+  // Initial scan
+  const current = await provider.getBlockNumber();
+  lastBlock = current - 100;
   await checkAllSwaps();
 }
 
