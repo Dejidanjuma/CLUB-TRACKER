@@ -100,9 +100,9 @@ async function sendTradeMessage(message, isBuy, symbol) {
     } else {
       await bot.sendMessage(CHAT_ID, message, opts);
     }
-    console.log(`✅ Sent ${symbol} ${isBuy ? "BUY" : "SELL"}`);
+    console.log(`✅ Telegram sent ${symbol} ${isBuy ? "BUY" : "SELL"}`);
   } catch (err) {
-    console.error("Telegram error:", err.message);
+    console.error("❌ Telegram error:", err.message);
   }
 }
 
@@ -116,9 +116,16 @@ async function checkTokenV2(t, fromBlock, toBlock) {
     if (seenTx.has(txHash)) continue;
     seenTx.add(txHash);
 
-    const a0In = event.args[1], a1In = event.args[2], a0Out = event.args[3], a1Out = event.args[4];
+    const a0In = event.args[1];
+    const a1In = event.args[2];
+    const a0Out = event.args[3];
+    const a1Out = event.args[4];
 
-    let isBuy = false, wetnAmount = 0, tokenAmount = 0;
+    console.log(`🔍 ${t.symbol} Swap: a0In=${a0In} a1In=${a1In} a0Out=${a0Out} a1Out=${a1Out} Tx:${txHash.slice(0,10)}...`);
+
+    let isBuy = false;
+    let wetnAmount = 0;
+    let tokenAmount = 0;
 
     if (t.wetnIsToken0) {
       isBuy = a0In > 0n;
@@ -133,79 +140,4 @@ async function checkTokenV2(t, fromBlock, toBlock) {
     if (tokenAmount < 0.000001 || wetnAmount < 0.000001) continue;
 
     const wallet = await getTraderWallet(txHash);
-    if (!wallet) continue;
-
-    const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, txHash, wallet);
-    await sendTradeMessage(message, isBuy, t.symbol);
-  }
-}
-
-async function checkTokenV3(t, fromBlock, toBlock) {
-  const pool = new ethers.Contract(t.pool, v3Abi, provider);
-  const events = await pool.queryFilter("Swap", fromBlock, toBlock);
-  const dec = tokenDecimals[t.symbol] || 18;
-
-  for (const event of events) {
-    const txHash = event.transactionHash;
-    if (seenTx.has(txHash)) continue;
-    seenTx.add(txHash);
-
-    const amount0 = event.args[2];
-    const amount1 = event.args[3];
-    const wetnRaw = t.wetnIsToken0 ? amount0 : amount1;
-    const tokenRaw = t.wetnIsToken0 ? amount1 : amount0;
-
-    const isBuy = tokenRaw < 0n;
-    const wetnAmount = Number(ethers.formatUnits(Math.abs(Number(wetnRaw)), 18));
-    const tokenAmount = Number(ethers.formatUnits(Math.abs(Number(tokenRaw)), dec));
-
-    if (tokenAmount < 0.000001) continue;
-
-    const wallet = await getTraderWallet(txHash);
-    if (!wallet) continue;
-
-    const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, txHash, wallet);
-    await sendTradeMessage(message, isBuy, t.symbol);
-  }
-}
-
-async function checkAllSwaps() {
-  try {
-    const currentBlock = await provider.getBlockNumber();
-    const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 100;
-    console.log(`Checking blocks ${fromBlock} to ${currentBlock}`);
-
-    for (const t of tokens) {
-      try {
-        if (t.version === "v2") await checkTokenV2(t, fromBlock, currentBlock);
-        else await checkTokenV3(t, fromBlock, currentBlock);
-      } catch (e) {}
-    }
-
-    lastBlock = currentBlock;
-
-    // Cleanup old seenTx to prevent memory leak
-    if (seenTx.size > 5000) {
-      const arr = Array.from(seenTx).slice(-3000);
-      seenTx.clear();
-      arr.forEach(h => seenTx.add(h));
-      console.log("Cleaned seenTx set");
-    }
-  } catch (e) {
-    console.error("Check error:", e.message);
-  }
-}
-
-async function start() {
-  console.log("Bot starting...");
-  await loadDecimals();
-  await updatePrice();
-  setInterval(updatePrice, 120000);
-  setInterval(checkAllSwaps, 6000); // balanced interval
-  await checkAllSwaps();
-}
-
-start();
-
-const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => { res.writeHead(200); res.end("Bot is running"); }).listen(PORT);
+    if (!
