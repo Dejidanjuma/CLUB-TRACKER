@@ -4,6 +4,7 @@ const http = require("http");
 
 const RPC = "https://rpc.ankr.com/electroneum";
 const WETN = "0x138DAFbDA0CCB3d8E39C19edb0510Fc31b7C1c77";
+const ROUTER = "0x3fC5f9a8F5a7D1eD3c0E6a8D5b7a8d6b3e7f8a9b"; // ElectroSwap Router
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.MP4";
@@ -118,7 +119,7 @@ async function checkTokenV2(t, fromBlock, toBlock) {
 
     const a0In = event.args[1], a1In = event.args[2], a0Out = event.args[3], a1Out = event.args[4];
 
-    console.log(`🔍 ${t.symbol} Event: a0In=${a0In} a1In=${a1In} a0Out=${a0Out} a1Out=${a1Out}`);
+    console.log(`🔍 ${t.symbol} Swap: a0In=${a0In} a1In=${a1In} a0Out=${a0Out} a1Out=${a1Out}`);
 
     let isBuy = false, wetnAmount = 0, tokenAmount = 0;
 
@@ -174,7 +175,7 @@ async function checkTokenV3(t, fromBlock, toBlock) {
 async function checkAllSwaps() {
   try {
     const currentBlock = await provider.getBlockNumber();
-    const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 100;
+    const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 200;
     console.log(`Checking blocks ${fromBlock} to ${currentBlock}`);
 
     for (const t of tokens) {
@@ -190,24 +191,12 @@ async function checkAllSwaps() {
 }
 
 async function start() {
-  console.log("Bot starting with real-time listener...");
+  console.log("Bot starting...");
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
-
-  provider.on("block", async (blockNumber) => {
-    console.log(`New block detected: ${blockNumber}`);
-    await checkAllSwaps();
-  });
-
-  const current = await provider.getBlockNumber();
-  lastBlock = current - 100;
+  setInterval(checkAllSwaps, 4000);
   await checkAllSwaps();
-
-  // Test message after 5 seconds
-  setTimeout(() => {
-    bot.sendMessage(CHAT_ID, "🧪 Test message - TG is connected").catch(err => console.error("Test failed:", err));
-  }, 5000);
 }
 
 start();
