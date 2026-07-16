@@ -102,7 +102,7 @@ async function sendTradeMessage(message, isBuy, symbol) {
     }
     console.log(`✅ Sent ${symbol} ${isBuy ? "BUY" : "SELL"}`);
   } catch (err) {
-    console.error("❌ Send failed:", err.message);
+    console.error("Telegram error:", err.message);
   }
 }
 
@@ -117,8 +117,6 @@ async function checkTokenV2(t, fromBlock, toBlock) {
     seenTx.add(txHash);
 
     const a0In = event.args[1], a1In = event.args[2], a0Out = event.args[3], a1Out = event.args[4];
-
-    console.log(`🔍 ${t.symbol} Swap: a0In=${a0In} a1In=${a1In} a0Out=${a0Out} a1Out=${a1Out}`);
 
     let isBuy = false, wetnAmount = 0, tokenAmount = 0;
 
@@ -154,7 +152,6 @@ async function checkTokenV3(t, fromBlock, toBlock) {
 
     const amount0 = event.args[2];
     const amount1 = event.args[3];
-
     const wetnRaw = t.wetnIsToken0 ? amount0 : amount1;
     const tokenRaw = t.wetnIsToken0 ? amount1 : amount0;
 
@@ -175,7 +172,7 @@ async function checkTokenV3(t, fromBlock, toBlock) {
 async function checkAllSwaps() {
   try {
     const currentBlock = await provider.getBlockNumber();
-    const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 150;
+    const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 100;
     console.log(`Checking blocks ${fromBlock} to ${currentBlock}`);
 
     for (const t of tokens) {
@@ -184,7 +181,16 @@ async function checkAllSwaps() {
         else await checkTokenV3(t, fromBlock, currentBlock);
       } catch (e) {}
     }
+
     lastBlock = currentBlock;
+
+    // Cleanup old seenTx to prevent memory leak
+    if (seenTx.size > 5000) {
+      const arr = Array.from(seenTx).slice(-3000);
+      seenTx.clear();
+      arr.forEach(h => seenTx.add(h));
+      console.log("Cleaned seenTx set");
+    }
   } catch (e) {
     console.error("Check error:", e.message);
   }
@@ -195,7 +201,7 @@ async function start() {
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
-  setInterval(checkAllSwaps, 5000);
+  setInterval(checkAllSwaps, 6000); // balanced interval
   await checkAllSwaps();
 }
 
