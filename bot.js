@@ -124,4 +124,78 @@ async function checkTokenV2(t, fromBlock, toBlock) {
       wetnAmount = Number(ethers.formatUnits(isBuy ? a0In : a0Out, 18));
       tokenAmount = Number(ethers.formatUnits(isBuy ? a1Out : a1In, dec));
     } else {
-      if (a1In
+      if (a1In > 0n && a0Out > 0n) isBuy = true;
+      else if (a0In > 0n && a1Out > 0n) isBuy = false;
+
+      wetnAmount = Number(ethers.formatUnits(isBuy ? a1In : a1Out, 18));
+      tokenAmount = Number(ethers.formatUnits(isBuy ? a0Out : a0In, dec));
+    }
+
+    if (tokenAmount < 0.000001 || wetnAmount < 0.000001) continue;
+
+    const wallet = await getTraderWallet(txHash);
+    if (!wallet) continue;
+
+    const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, txHash, wallet);
+    await sendTradeMessage(message, isBuy, t.symbol);
+    console.log("✅ POSTED", t.symbol, isBuy ? "BUY" : "SELL");
+  }
+}
+
+async function checkTokenV3(t, fromBlock, toBlock) {
+  const pool = new ethers.Contract(t.pool, v3Abi, provider);
+  const events = await pool.queryFilter("Swap", fromBlock, toBlock);
+  const dec = tokenDecimals[t.symbol] || 18;
+
+  for (const event of events) {
+    const txHash = event.transactionHash;
+    if (seenTx.has(txHash)) continue;
+    seenTx.add(txHash);
+
+    const amount0 = event.args[2];
+    const amount1 = event.args[3];
+    const wetnRaw = t.wetnIsToken0 ? amount0 : amount1;
+    const tokenRaw = t.wetnIsToken0 ? amount1 : amount0;
+
+    const isBuy = tokenRaw < 0n;
+    const wetnAmount = Number(ethers.formatUnits(Math.abs(Number(wetnRaw)), 18));
+    const tokenAmount = Number(ethers.formatUnits(Math.abs(Number(tokenRaw)), dec));
+
+    if (tokenAmount < 0.000001) continue;
+
+    const wallet = await getTraderWallet(txHash);
+    if (!wallet) continue;
+
+    const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, txHash, wallet);
+    await sendTradeMessage(message, isBuy, t.symbol);
+  }
+}
+
+async function checkAllSwaps() {
+  try {
+    const currentBlock = await provider.getBlockNumber();
+    if (lastBlock === null) lastBlock = currentBlock - 300;
+
+    for (const t of tokens) {
+      try {
+        if (t.version === "v2") await checkTokenV2(t, lastBlock + 1, currentBlock);
+        else await checkTokenV3(t, lastBlock + 1, currentBlock);
+      } catch (e) {}
+    }
+    lastBlock = currentBlock;
+  } catch (e) {}
+}
+
+async function start() {
+  console.log("Bot starting...");
+  await loadDecimals();
+  await updatePrice();
+  setInterval(updatePrice, 120000);
+  setInterval(checkAllSwaps, 6000);
+  await checkAllSwaps();
+}
+
+start();
+
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => { res.writeHead(200); res.end("Bot is running"); }).listen(PORT);
