@@ -4,7 +4,6 @@ const http = require("http");
 
 const RPC = "https://rpc.ankr.com/electroneum";
 const WETN = "0x138DAFbDA0CCB3d8E39C19edb0510Fc31b7C1c77";
-const ROUTER = "0x3fC5f9a8F5a7D1eD3c0E6a8D5b7a8d6b3e7f8a9b"; // ElectroSwap Router
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.MP4";
@@ -172,34 +171,3 @@ async function checkTokenV3(t, fromBlock, toBlock) {
   }
 }
 
-async function checkAllSwaps() {
-  try {
-    const currentBlock = await provider.getBlockNumber();
-    const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 200;
-    console.log(`Checking blocks ${fromBlock} to ${currentBlock}`);
-
-    for (const t of tokens) {
-      try {
-        if (t.version === "v2") await checkTokenV2(t, fromBlock, currentBlock);
-        else await checkTokenV3(t, fromBlock, currentBlock);
-      } catch (e) {}
-    }
-    lastBlock = currentBlock;
-  } catch (e) {
-    console.error("Check error:", e.message);
-  }
-}
-
-async function start() {
-  console.log("Bot starting...");
-  await loadDecimals();
-  await updatePrice();
-  setInterval(updatePrice, 120000);
-  setInterval(checkAllSwaps, 4000);
-  await checkAllSwaps();
-}
-
-start();
-
-const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => { res.writeHead(200); res.end("Bot is running"); }).listen(PORT);
