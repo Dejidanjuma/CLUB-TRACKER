@@ -118,7 +118,7 @@ async function checkTokenV2(t, fromBlock, toBlock) {
 
     const a0In = event.args[1], a1In = event.args[2], a0Out = event.args[3], a1Out = event.args[4];
 
-    console.log(`🔍 ${t.symbol} Swap: a0In=${a0In} a1In=${a1In} a0Out=${a0Out} a1Out=${a1Out}`);
+    console.log(`🔍 ${t.symbol} Swap Event: a0In=${a0In} a1In=${a1In} a0Out=${a0Out} a1Out=${a1Out}`);
 
     let isBuy = false, wetnAmount = 0, tokenAmount = 0;
 
