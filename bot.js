@@ -6,7 +6,7 @@ const RPC = "https://rpc.ankr.com/electroneum";
 const WETN = "0x138DAFbDA0CCB3d8E39C19edb0510Fc31b7C1c77";
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
-const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.MP4";
+const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.mp4";
 
 const provider = new ethers.JsonRpcProvider(RPC, { chainId: 52014, name: "electroneum" });
 const bot = new TelegramBot(BOT_TOKEN, { polling: false });
@@ -102,7 +102,13 @@ async function sendTradeMessage(message, isBuy, symbol) {
     }
     console.log(`✅ Sent ${symbol} ${isBuy ? "BUY" : "SELL"}`);
   } catch (err) {
-    console.error("Telegram error:", err.message);
+    console.error("Animation send failed, falling back to text:", err.message);
+    try {
+      await bot.sendMessage(CHAT_ID, message, opts);
+      console.log(`✅ Sent ${symbol} ${isBuy ? "BUY" : "SELL"} (text fallback)`);
+    } catch (err2) {
+      console.error("Fallback also failed:", err2.message);
+    }
   }
 }
 
