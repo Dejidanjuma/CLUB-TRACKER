@@ -158,8 +158,8 @@ async function checkTokenV3(t, fromBlock, toBlock) {
     const tokenRaw = t.wetnIsToken0 ? amount1 : amount0;
 
     const isBuy = tokenRaw < 0n;
-    const wetnAmount = Number(ethers.formatUnits(Math.abs(Number(wetnRaw)), 18));
-    const tokenAmount = Number(ethers.formatUnits(Math.abs(Number(tokenRaw)), dec));
+    const wetnAmount = Number(ethers.formatUnits(wetnRaw < 0n ? -wetnRaw : wetnRaw, 18));
+    const tokenAmount = Number(ethers.formatUnits(tokenRaw < 0n ? -tokenRaw : tokenRaw, dec));
 
     if (tokenAmount < 0.000001) continue;
 
@@ -177,11 +177,15 @@ async function checkAllSwaps() {
     const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 200;
     console.log(`Checking blocks ${fromBlock} to ${currentBlock}`);
 
+    if (fromBlock > currentBlock) return;
+
     for (const t of tokens) {
       try {
         if (t.version === "v2") await checkTokenV2(t, fromBlock, currentBlock);
         else await checkTokenV3(t, fromBlock, currentBlock);
-      } catch (e) {}
+      } catch (e) {
+        console.error(`Error checking ${t.symbol}:`, e.message);
+      }
     }
     lastBlock = currentBlock;
   } catch (e) {
