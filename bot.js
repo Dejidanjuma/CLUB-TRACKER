@@ -7,6 +7,8 @@ const WETN = "0x138DAFbDA0CCB3d8E39C19edb0510Fc31b7C1c77";
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.mp4";
+const CLUB_SELL_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_sell.mp4";
+const BOLT_SELL_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/bolt_sell.mp4";
 
 const provider = new ethers.JsonRpcProvider(RPC, { chainId: 52014, name: "electroneum" });
 const bot = new TelegramBot(BOT_TOKEN, { polling: false });
@@ -166,11 +168,11 @@ function formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, txHash, wa
     "🔄 [Trade " + symbolIn + "→" + symbolOut + "](" + tradeLink + ") | ⚡ [Live Txs](" + liveTxsLink + ")";
 }
 
-async function sendMessageWithOptionalGif(message, useGif) {
+async function sendMessageWithOptionalGif(message, gifUrl) {
   const opts = { parse_mode: "Markdown", disable_web_page_preview: true };
   try {
-    if (useGif) {
-      await bot.sendAnimation(CHAT_ID, BUY_GIF_URL, { caption: message, parse_mode: "Markdown" });
+    if (gifUrl) {
+      await bot.sendAnimation(CHAT_ID, gifUrl, { caption: message, parse_mode: "Markdown" });
     } else {
       await bot.sendMessage(CHAT_ID, message, opts);
     }
@@ -182,6 +184,19 @@ async function sendMessageWithOptionalGif(message, useGif) {
       console.error("Fallback also failed:", err2.message);
     }
   }
+}
+
+function pickWetnGif(symbol, isBuy) {
+  if (symbol === "CLUB") return isBuy ? BUY_GIF_URL : CLUB_SELL_GIF_URL;
+  if (symbol === "BOLT" && !isBuy) return BOLT_SELL_GIF_URL;
+  return null;
+}
+
+function pickCrossGif(symbolIn, symbolOut) {
+  if (symbolOut === "CLUB") return BUY_GIF_URL;
+  if (symbolIn === "CLUB") return CLUB_SELL_GIF_URL;
+  if (symbolIn === "BOLT") return BOLT_SELL_GIF_URL;
+  return null;
 }
 
 function makeKey(txHash, logIndex) {
@@ -217,8 +232,8 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
     if (!wallet) continue;
 
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel);
-    const useGif = isBuy && p.symbol === "CLUB";
-    await sendMessageWithOptionalGif(message, useGif);
+    const gifUrl = pickWetnGif(p.symbol, isBuy);
+    await sendMessageWithOptionalGif(message, gifUrl);
     console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} (WETN v2 pool ${p.pool.slice(0,8)})`);
   }
 }
@@ -248,8 +263,8 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
     if (!wallet) continue;
 
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel);
-    const useGif = isBuy && p.symbol === "CLUB";
-    await sendMessageWithOptionalGif(message, useGif);
+    const gifUrl = pickWetnGif(p.symbol, isBuy);
+    await sendMessageWithOptionalGif(message, gifUrl);
     console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} (WETN v3 pool ${p.pool.slice(0,8)})`);
   }
 }
@@ -296,8 +311,8 @@ async function checkCrossPoolV2(p, fromBlock, toBlock) {
     if (!wallet) continue;
 
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
-    const useGif = symbolOut === "CLUB";
-    await sendMessageWithOptionalGif(message, useGif);
+    const gifUrl = pickCrossGif(symbolIn, symbolOut);
+    await sendMessageWithOptionalGif(message, gifUrl);
     console.log(`✅ Sent cross swap ${symbolIn}->${symbolOut} (v2 pool ${p.pool.slice(0,8)})`);
   }
 }
@@ -335,8 +350,8 @@ async function checkCrossPoolV3(p, fromBlock, toBlock) {
     if (!wallet) continue;
 
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
-    const useGif = symbolOut === "CLUB";
-    await sendMessageWithOptionalGif(message, useGif);
+    const gifUrl = pickCrossGif(symbolIn, symbolOut);
+    await sendMessageWithOptionalGif(message, gifUrl);
     console.log(`✅ Sent cross swap ${symbolIn}->${symbolOut} (v3 pool ${p.pool.slice(0,8)})`);
   }
 }
