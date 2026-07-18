@@ -4,9 +4,10 @@ const http = require("http");
 
 const RPC = "https://rpc.ankr.com/electroneum";
 const WETN = "0x138DAFbDA0CCB3d8E39C19edb0510Fc31b7C1c77";
+const ROUTER = "0x3fC5f9a8F5a7D1eD3c0E6a8D5b7a8d6b3e7f8a9b"; // ElectroSwap Router (update if wrong)
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
-const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.mp4";
+const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.MP4";
 
 const provider = new ethers.JsonRpcProvider(RPC, { chainId: 52014, name: "electroneum" });
 const bot = new TelegramBot(BOT_TOKEN, { polling: false });
@@ -102,13 +103,7 @@ async function sendTradeMessage(message, isBuy, symbol) {
     }
     console.log(`✅ Sent ${symbol} ${isBuy ? "BUY" : "SELL"}`);
   } catch (err) {
-    console.error("Animation send failed, falling back to text:", err.message);
-    try {
-      await bot.sendMessage(CHAT_ID, message, opts);
-      console.log(`✅ Sent ${symbol} ${isBuy ? "BUY" : "SELL"} (text fallback)`);
-    } catch (err2) {
-      console.error("Fallback also failed:", err2.message);
-    }
+    console.error("Telegram error:", err.message);
   }
 }
 
@@ -183,15 +178,11 @@ async function checkAllSwaps() {
     const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 200;
     console.log(`Checking blocks ${fromBlock} to ${currentBlock}`);
 
-    if (fromBlock > currentBlock) return;
-
     for (const t of tokens) {
       try {
         if (t.version === "v2") await checkTokenV2(t, fromBlock, currentBlock);
         else await checkTokenV3(t, fromBlock, currentBlock);
-      } catch (e) {
-        console.error(`Error checking ${t.symbol}:`, e.message);
-      }
+      } catch (e) {}
     }
     lastBlock = currentBlock;
   } catch (e) {
