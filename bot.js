@@ -9,6 +9,8 @@ const CHAT_ID = process.env.CHAT_ID;
 const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.mp4";
 const CLUB_SELL_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_sell.mp4";
 const BOLT_SELL_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/bolt_sell.mp4";
+const BOLT_BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/bolt_buy.mp4";
+const DYNO_BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/dyno_buy.mp4";
 
 const provider = new ethers.JsonRpcProvider(RPC, { chainId: 52014, name: "electroneum" });
 const bot = new TelegramBot(BOT_TOKEN, { polling: false });
@@ -188,12 +190,15 @@ async function sendMessageWithOptionalGif(message, gifUrl) {
 
 function pickWetnGif(symbol, isBuy) {
   if (symbol === "CLUB") return isBuy ? BUY_GIF_URL : CLUB_SELL_GIF_URL;
-  if (symbol === "BOLT" && !isBuy) return BOLT_SELL_GIF_URL;
+  if (symbol === "BOLT") return isBuy ? BOLT_BUY_GIF_URL : BOLT_SELL_GIF_URL;
+  if (symbol === "DYNO" && isBuy) return DYNO_BUY_GIF_URL;
   return null;
 }
 
 function pickCrossGif(symbolIn, symbolOut) {
   if (symbolOut === "CLUB") return BUY_GIF_URL;
+  if (symbolOut === "BOLT") return BOLT_BUY_GIF_URL;
+  if (symbolOut === "DYNO") return DYNO_BUY_GIF_URL;
   if (symbolIn === "CLUB") return CLUB_SELL_GIF_URL;
   if (symbolIn === "BOLT") return BOLT_SELL_GIF_URL;
   return null;
