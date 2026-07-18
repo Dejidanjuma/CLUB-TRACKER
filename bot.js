@@ -4,10 +4,9 @@ const http = require("http");
 
 const RPC = "https://rpc.ankr.com/electroneum";
 const WETN = "0x138DAFbDA0CCB3d8E39C19edb0510Fc31b7C1c77";
-const ROUTER = "0x3fC5f9a8F5a7D1eD3c0E6a8D5b7a8d6b3e7f8a9b"; // ElectroSwap Router (update if wrong)
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
-const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.MP4";
+const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.mp4";
 
 const provider = new ethers.JsonRpcProvider(RPC, { chainId: 52014, name: "electroneum" });
 const bot = new TelegramBot(BOT_TOKEN, { polling: false });
@@ -15,17 +14,7 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: false });
 process.on("unhandledRejection", (reason) => console.error("UNHANDLED:", reason));
 process.on("uncaughtException", (err) => console.error("UNCAUGHT:", err));
 
-const tokens = [
-  { symbol: "CLUB", address: "0xC9FC4AB00911793D99b5c7Bd01f01203C21D4131", pool: "0x86566c3c78424e3c3c2aDb274FAB551B7262E0ca", version: "v3", wetnIsToken0: true, website: "https://planetetn.org/profile/4-etn-club-ninjars", websiteLabel: "PlanetETN: CLUB Website" },
-  { symbol: "BOLT", address: "0x043fAa1b5C5FC9a7dc35171f290c29ECDE0cCff1", pool: "0x4D2b867FCa568B5DC6367646811FaA4ED3C0520F", version: "v2", wetnIsToken0: false },
-  { symbol: "DYNO", address: "0xEe432C220273e4F949007B4c1946562826Efa055", pool: "0xf24c6096E36EB242DdFc3B672Ed9d1f62aB33366", version: "v2", wetnIsToken0: true },
-  { symbol: "PANDY", address: "0xc20d02538368D8F7deBeAeB99D9a8b4d4D1DDC1C", pool: "0x0d138f0bf5C7Bb25A078F791E5802776656e82D3", version: "v2", wetnIsToken0: true },
-  { symbol: "DCNT", address: "0xE74e4E7A064310466f3bdBd3F3Ce4e8c8F7CF1d5", pool: "0x6cDF9e7c8177BFCEc940E3f195ACf5a9C04ae3CD", version: "v3", wetnIsToken0: true },
-  { symbol: "SPIKE", address: "0x9bC7ab566e50A915016aE165A9c58Dad4e4828a1", pool: "0xa5Fb801c30FDC9b0532583BF02Df15E36e7b1a16", version: "v2", wetnIsToken0: true },
-  { symbol: "USDC", address: "0x3187deAd7A2Bd6770F5Fe81495D1B715926AAe6e", pool: "0x2cB2Af7aef7AB4cc3228F9c55EE8542Cb323Ad8A", version: "v3", wetnIsToken0: true },
-  { symbol: "USDT", address: "0x48E722f1458b253c2FB0E573F939318D7Dbd54e7", pool: "0x0CC625331C9b22D94fEF29d462aB1c9B26dFF196", version: "v3", wetnIsToken0: true },
-  { symbol: "CORE", address: "0x309B916b3A90cb3E071697Ea9680e9217A30066f", pool: "0xc3FE6f98765493aB62AD87C9B5022Ff2FAA2e98D", version: "v2", wetnIsToken0: true }
-];
+const tokens = [ /* your tokens array here - same as before */ ];
 
 const v2Abi = ["event Swap(address indexed sender, uint amount0In, uint amount1In, uint amount0Out, uint amount1Out, address indexed to)"];
 const v3Abi = ["event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)"];
@@ -97,98 +86,26 @@ async function sendTradeMessage(message, isBuy, symbol) {
   const opts = { parse_mode: "Markdown", disable_web_page_preview: true };
   try {
     if (isBuy && symbol === "CLUB") {
+      console.log("Trying to send CLUB animation...");
       await bot.sendAnimation(CHAT_ID, BUY_GIF_URL, { caption: message, parse_mode: "Markdown" });
+      console.log("✅ Sent CLUB BUY with animation");
     } else {
       await bot.sendMessage(CHAT_ID, message, opts);
+      console.log(`✅ Sent ${symbol} ${isBuy ? "BUY" : "SELL"}`);
     }
-    console.log(`✅ Sent ${symbol} ${isBuy ? "BUY" : "SELL"}`);
   } catch (err) {
-    console.error("Telegram error:", err.message);
-  }
-}
-
-async function checkTokenV2(t, fromBlock, toBlock) {
-  const pool = new ethers.Contract(t.pool, v2Abi, provider);
-  const events = await pool.queryFilter("Swap", fromBlock, toBlock);
-  const dec = tokenDecimals[t.symbol] || 18;
-
-  for (const event of events) {
-    const txHash = event.transactionHash;
-    if (seenTx.has(txHash)) continue;
-    seenTx.add(txHash);
-
-    const a0In = event.args[1], a1In = event.args[2], a0Out = event.args[3], a1Out = event.args[4];
-
-    console.log(`🔍 ${t.symbol} Swap Event: a0In=${a0In} a1In=${a1In} a0Out=${a0Out} a1Out=${a1Out}`);
-
-    let isBuy = false, wetnAmount = 0, tokenAmount = 0;
-
-    if (t.wetnIsToken0) {
-      isBuy = a0In > 0n;
-      wetnAmount = Number(ethers.formatUnits(isBuy ? a0In : a0Out, 18));
-      tokenAmount = Number(ethers.formatUnits(isBuy ? a1Out : a1In, dec));
-    } else {
-      isBuy = a1In > 0n && a0Out > 0n;
-      wetnAmount = Number(ethers.formatUnits(isBuy ? a1In : a1Out, 18));
-      tokenAmount = Number(ethers.formatUnits(isBuy ? a0Out : a0In, dec));
+    console.error("Telegram send failed:", err.message);
+    // Fallback to text
+    try {
+      await bot.sendMessage(CHAT_ID, message, opts);
+      console.log(`✅ Sent ${symbol} ${isBuy ? "BUY" : "SELL"} (text fallback)`);
+    } catch (err2) {
+      console.error("Fallback also failed:", err2.message);
     }
-
-    if (tokenAmount < 0.000001 || wetnAmount < 0.000001) continue;
-
-    const wallet = await getTraderWallet(txHash);
-    if (!wallet) continue;
-
-    const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, txHash, wallet);
-    await sendTradeMessage(message, isBuy, t.symbol);
   }
 }
 
-async function checkTokenV3(t, fromBlock, toBlock) {
-  const pool = new ethers.Contract(t.pool, v3Abi, provider);
-  const events = await pool.queryFilter("Swap", fromBlock, toBlock);
-  const dec = tokenDecimals[t.symbol] || 18;
-
-  for (const event of events) {
-    const txHash = event.transactionHash;
-    if (seenTx.has(txHash)) continue;
-    seenTx.add(txHash);
-
-    const amount0 = event.args[2];
-    const amount1 = event.args[3];
-    const wetnRaw = t.wetnIsToken0 ? amount0 : amount1;
-    const tokenRaw = t.wetnIsToken0 ? amount1 : amount0;
-
-    const isBuy = tokenRaw < 0n;
-    const wetnAmount = Number(ethers.formatUnits(wetnRaw < 0n ? -wetnRaw : wetnRaw, 18));
-    const tokenAmount = Number(ethers.formatUnits(tokenRaw < 0n ? -tokenRaw : tokenRaw, dec));
-
-    if (tokenAmount < 0.000001) continue;
-
-    const wallet = await getTraderWallet(txHash);
-    if (!wallet) continue;
-
-    const message = formatMessage(t, isBuy, wetnAmount, tokenAmount, txHash, wallet);
-    await sendTradeMessage(message, isBuy, t.symbol);
-  }
-}
-
-async function checkAllSwaps() {
-  try {
-    const currentBlock = await provider.getBlockNumber();
-    const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 200;
-    console.log(`Checking blocks ${fromBlock} to ${currentBlock}`);
-
-    for (const t of tokens) {
-      try {
-        if (t.version === "v2") await checkTokenV2(t, fromBlock, currentBlock);
-        else await checkTokenV3(t, fromBlock, currentBlock);
-      } catch (e) {}
-    }
-    lastBlock = currentBlock;
-  } catch (e) {
-    console.error("Check error:", e.message);
-  }
-}
+// ... (keep the rest of the code: checkTokenV2, checkTokenV3, checkAllSwaps, start() the same as the last version I gave you)
 
 async function start() {
   console.log("Bot starting...");
