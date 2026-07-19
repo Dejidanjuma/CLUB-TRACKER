@@ -108,13 +108,45 @@ async function updatePrice() {
   } catch (e) {}
 }
 
-async function getTraderWallet(txHash) {
+const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const receiptCache = new Map();
+
+async function getReceipt(txHash) {
+  if (receiptCache.has(txHash)) return receiptCache.get(txHash);
   try {
-    const tx = await provider.getTransaction(txHash);
-    return tx.from;
+    const receipt = await provider.getTransactionReceipt(txHash);
+    receiptCache.set(txHash, receipt);
+    if (receiptCache.size > 500) receiptCache.clear();
+    return receipt;
   } catch (e) {
     return null;
   }
+}
+
+async function getTraderWallet(txHash) {
+  const receipt = await getReceipt(txHash);
+  return receipt ? receipt.from : null;
+}
+
+function walletTopicOf(wallet) {
+  return "0x000000000000000000000000" + wallet.slice(2).toLowerCase();
+}
+
+function transferInvolvesWallet(receipt, tokenAddress, wallet, direction) {
+  const walletTopic = walletTopicOf(wallet);
+  for (const log of receipt.logs) {
+    if (log.address.toLowerCase() !== tokenAddress.toLowerCase()) continue;
+    if (log.topics[0] !== TRANSFER_TOPIC) continue;
+    if (direction === "from" && log.topics[1].toLowerCase() === walletTopic) return true;
+    if (direction === "to" && log.topics[2].toLowerCase() === walletTopic) return true;
+  }
+  return false;
+}
+
+async function isGenuineLeg(txHash, wallet, tokenAddress, direction) {
+  const receipt = await getReceipt(txHash);
+  if (!receipt) return false;
+  return transferInvolvesWallet(receipt, tokenAddress, wallet, direction);
 }
 
 function walletLinkParts(wallet) {
@@ -236,6 +268,13 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
     const wallet = await getTraderWallet(event.transactionHash);
     if (!wallet) continue;
 
+    const direction = isBuy ? "to" : "from";
+    const genuine = await isGenuineLeg(event.transactionHash, wallet, p.token, direction);
+    if (!genuine) {
+      console.log(`⏭️  Skipped ${p.symbol} ${isBuy ? "BUY" : "SELL"} (intermediate hop, not user-facing) [v2 pool ${p.pool.slice(0,8)}]`);
+      continue;
+    }
+
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
     await sendMessageWithOptionalGif(message, gifUrl);
@@ -266,6 +305,13 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
 
     const wallet = await getTraderWallet(event.transactionHash);
     if (!wallet) continue;
+
+    const direction = isBuy ? "to" : "from";
+    const genuine = await isGenuineLeg(event.transactionHash, wallet, p.token, direction);
+    if (!genuine) {
+      console.log(`⏭️  Skipped ${p.symbol} ${isBuy ? "BUY" : "SELL"} (intermediate hop, not user-facing) [v3 pool ${p.pool.slice(0,8)}]`);
+      continue;
+    }
 
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
@@ -315,6 +361,13 @@ async function checkCrossPoolV2(p, fromBlock, toBlock) {
     const wallet = await getTraderWallet(event.transactionHash);
     if (!wallet) continue;
 
+    const genuineOut = await isGenuineLeg(event.transactionHash, wallet, ADDR[symbolOut], "to");
+    const genuineIn = await isGenuineLeg(event.transactionHash, wallet, ADDR[symbolIn], "from");
+    if (!genuineOut || !genuineIn) {
+      console.log(`⏭️  Skipped cross swap ${symbolIn}->${symbolOut} (intermediate hop, not user-facing) [v2 pool ${p.pool.slice(0,8)}]`);
+      continue;
+    }
+
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
     await sendMessageWithOptionalGif(message, gifUrl);
@@ -353,6 +406,13 @@ async function checkCrossPoolV3(p, fromBlock, toBlock) {
 
     const wallet = await getTraderWallet(event.transactionHash);
     if (!wallet) continue;
+
+    const genuineOut = await isGenuineLeg(event.transactionHash, wallet, ADDR[symbolOut], "to");
+    const genuineIn = await isGenuineLeg(event.transactionHash, wallet, ADDR[symbolIn], "from");
+    if (!genuineOut || !genuineIn) {
+      console.log(`⏭️  Skipped cross swap ${symbolIn}->${symbolOut} (intermediate hop, not user-facing) [v3 pool ${p.pool.slice(0,8)}]`);
+      continue;
+    }
 
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
