@@ -33,6 +33,7 @@ const ADDR = {
 const CLUB_WEBSITE = "https://planetetn.org/profile/4-etn-club-ninjars";
 const STABLES = ["USDC", "USDT"];
 
+// WETN pools: every pool where a tracked token trades directly against WETN
 const wetnPools = [
   { symbol: "CLUB", token: ADDR.CLUB, pool: "0x86566c3c78424e3c3c2aDb274FAB551B7262E0ca", version: "v3", wetnIsToken0: true, website: CLUB_WEBSITE, websiteLabel: "PlanetETN: CLUB Website" },
 
@@ -60,6 +61,7 @@ const wetnPools = [
   { symbol: "CORE", token: ADDR.CORE, pool: "0xF0539385BD7057c81925382d1e74108Fc5c31bbC", version: "v3", wetnIsToken0: true }
 ];
 
+// Cross pools: pairs between two tracked tokens (neither side is WETN)
 const crossPools = [
   { symbolA: "BOLT", tokenA: ADDR.BOLT, symbolB: "CLUB", tokenB: ADDR.CLUB, pool: "0xEB7bEC5284Cf0287bD9A53f5E22A551b6282519F", version: "v3", aIsToken0: true },
   { symbolA: "CLUB", tokenA: ADDR.CLUB, symbolB: "DYNO", tokenB: ADDR.DYNO, pool: "0x20C914F760F90D239Dfdfc1e0630aa76B7904bbb", version: "v3", aIsToken0: true },
@@ -361,10 +363,9 @@ async function checkCrossPoolV2(p, fromBlock, toBlock) {
     const wallet = await getTraderWallet(event.transactionHash);
     if (!wallet) continue;
 
-    const genuineOut = await isGenuineLeg(event.transactionHash, wallet, ADDR[symbolOut], "to");
     const genuineIn = await isGenuineLeg(event.transactionHash, wallet, ADDR[symbolIn], "from");
-    if (!genuineOut || !genuineIn) {
-      console.log(`⏭️  Skipped cross swap ${symbolIn}->${symbolOut} (intermediate hop, not user-facing) [v2 pool ${p.pool.slice(0,8)}]`);
+    if (!genuineIn) {
+      console.log(`⏭️  Skipped cross swap ${symbolIn}->${symbolOut} (input not from trader wallet) [v2 pool ${p.pool.slice(0,8)}]`);
       continue;
     }
 
