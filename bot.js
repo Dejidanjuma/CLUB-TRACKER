@@ -113,6 +113,35 @@ function fmt(num, decimals) {
   return num.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
+// ====================== Emoji Circles Scaling ======================
+// Easy to adjust later
+const CIRCLE_MIN = 1;
+const CIRCLE_MAX = 50;
+const CIRCLE_BASE = 0.08;   // lower = more circles for small trades
+const CIRCLE_SCALE = 12.5;  // higher = grows faster
+
+function getCircleCount(usdValue) {
+  if (usdValue <= 0) return CIRCLE_MIN;
+  // Logarithmic scaling
+  const count = Math.round(CIRCLE_SCALE * Math.log10(usdValue / CIRCLE_BASE));
+  return Math.min(CIRCLE_MAX, Math.max(CIRCLE_MIN, count));
+}
+
+function buildCircles(isBuy, usdValue) {
+  const emoji = isBuy ? "🟢" : "🔴";
+  const count = getCircleCount(usdValue);
+
+  let result = "";
+  for (let i = 0; i < count; i++) {
+    result += emoji;
+    if ((i + 1) % 10 === 0 && i + 1 < count) {
+      result += "\n";
+    }
+  }
+  return result;
+}
+// ===================================================================
+
 async function loadDecimals() {
   for (const symbol of Object.keys(ADDR)) {
     try {
@@ -192,7 +221,7 @@ function walletLinkParts(wallet) {
 function formatWetnMessage(symbol, isBuy, wetnAmount, tokenAmount, txHash, wallet, poolAddress, website, websiteLabel) {
   const usdValue = wetnAmount * etnPriceUsd;
   const usdPricePerToken = tokenAmount > 0 ? usdValue / tokenAmount : 0;
-  const circles = (isBuy ? "🟢" : "🔴").repeat(10);
+  const circles = buildCircles(isBuy, usdValue);
   const label = isBuy ? "BUY" : "SELL";
   const roleLabel = isBuy ? "Buyer" : "Seller";
 
