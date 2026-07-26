@@ -171,9 +171,16 @@ function transferInvolvesWallet(receipt, tokenAddress, wallet, direction) {
 }
 
 async function isGenuineLeg(txHash, wallet, tokenAddress, direction) {
-  const receipt = await getReceipt(txHash);
-  if (!receipt) return false;
-  return transferInvolvesWallet(receipt, tokenAddress, wallet, direction);
+  try {
+    const receipt = await getReceipt(txHash);
+    if (!receipt) return true; // If we can't get the receipt, still send the notification
+
+    // Only skip if we are 100% sure it's an intermediate hop
+    const involves = transferInvolvesWallet(receipt, tokenAddress, wallet, direction);
+    return involves;
+  } catch (e) {
+    return true; // On any error, allow the notification
+  }
 }
 
 function walletLinkParts(wallet) {
