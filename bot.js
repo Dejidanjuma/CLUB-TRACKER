@@ -175,7 +175,6 @@ function transferInvolvesWallet(receipt, tokenAddress, wallet, direction) {
   return false;
 }
 
-// NEW: Get the real amount of a token transferred to/from the wallet
 function getRealTokenAmount(receipt, tokenAddress, wallet, direction, decimals) {
   if (!receipt) return 0;
   const walletTopic = walletTopicOf(wallet);
@@ -189,7 +188,6 @@ function getRealTokenAmount(receipt, tokenAddress, wallet, direction, decimals) 
     const isTo = log.topics[2].toLowerCase() === walletTopic;
 
     if ((direction === "from" && isFrom) || (direction === "to" && isTo)) {
-      // value is in log.data
       const value = BigInt(log.data);
       total += value;
     }
@@ -198,15 +196,12 @@ function getRealTokenAmount(receipt, tokenAddress, wallet, direction, decimals) 
   return Number(ethers.formatUnits(total, decimals));
 }
 
+// ====================== TEMPORARY: Always allow ======================
 async function isGenuineLeg(txHash, wallet, tokenAddress, direction) {
-  try {
-    const receipt = await getReceipt(txHash);
-    if (!receipt) return true;
-    return transferInvolvesWallet(receipt, tokenAddress, wallet, direction);
-  } catch (e) {
-    return true;
-  }
+  // TEMPORARY - Always return true so we can test if DYNO sells are detected
+  return true;
 }
+// =====================================================================
 
 function walletLinkParts(wallet) {
   const link = "https://blockexplorer.electroneum.com/address/" + wallet;
@@ -326,15 +321,14 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
     const wallet = await getTraderWallet(event.transactionHash);
     if (!wallet) continue;
 
+    // Temporary: always genuine
     const direction = isBuy ? "to" : "from";
     const genuine = await isGenuineLeg(event.transactionHash, wallet, p.token, direction);
     if (!genuine) {
-      console.log(`⏭️  Skipped ${p.symbol} ${isBuy ? "BUY" : "SELL"} (intermediate hop) [v2 ${p.pool.slice(0,8)}]`);
       seenKeys.add(key);
       continue;
     }
 
-    // === NEW: Get real token amount from Transfer events ===
     const receipt = await getReceipt(event.transactionHash);
     const tokenAmount = getRealTokenAmount(receipt, p.token, wallet, direction, dec);
 
@@ -376,12 +370,10 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
     const direction = isBuy ? "to" : "from";
     const genuine = await isGenuineLeg(event.transactionHash, wallet, p.token, direction);
     if (!genuine) {
-      console.log(`⏭️  Skipped ${p.symbol} ${isBuy ? "BUY" : "SELL"} (intermediate hop) [v3 ${p.pool.slice(0,8)}]`);
       seenKeys.add(key);
       continue;
     }
 
-    // === NEW: Get real token amount from Transfer events ===
     const receipt = await getReceipt(event.transactionHash);
     const tokenAmount = getRealTokenAmount(receipt, p.token, wallet, direction, dec);
 
