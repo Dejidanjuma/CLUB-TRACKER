@@ -7,6 +7,7 @@ const WETN = "0x138DAFbDA0CCB3d8E39C19edb0510Fc31b7C1c77";
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const CLUB_GROUP_CHAT_ID = process.env.CLUB_GROUP_CHAT_ID || "-1002386155004";
+const LIVE_TRADES_TOPIC_ID = 55341; // LIVE TRADES topic
 
 const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.mp4";
 const CLUB_SELL_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_sell.mp4";
@@ -95,7 +96,6 @@ function fmt(num, decimals) {
   return num.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
-// ====================== Emoji Circles Scaling ======================
 const CIRCLE_MIN = 1;
 const CIRCLE_MAX = 50;
 const CIRCLE_BASE = 0.08;
@@ -117,7 +117,6 @@ function buildCircles(isBuy, usdValue) {
   }
   return result;
 }
-// ===================================================================
 
 async function loadDecimals() {
   for (const symbol of Object.keys(ADDR)) {
@@ -243,11 +242,11 @@ function formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, txHash, wa
     "🔄 [Trade " + symbolIn + "→" + symbolOut + "](" + tradeLink + ") | ⚡ [Live Txs](" + liveTxsLink + ")";
 }
 
-// ====================== SEND TO BOTH GROUPS ======================
+// ====================== SEND FUNCTION WITH TOPIC SUPPORT ======================
 async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0) {
   const opts = { parse_mode: "Markdown", disable_web_page_preview: true };
 
-  // Main group - always
+  // 1. Always send to main group
   try {
     if (gifUrl) {
       await bot.sendAnimation(CHAT_ID, gifUrl, { caption: message, parse_mode: "Markdown" });
@@ -259,21 +258,33 @@ async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0) {
     try { await bot.sendMessage(CHAT_ID, message, opts); } catch (e) {}
   }
 
-  // CLUB group - only if ≥ $10
+  // 2. Send to LIVE TRADES topic only if ≥ $10
   if (usdValue >= 10) {
+    const topicOpts = {
+      parse_mode: "Markdown",
+      disable_web_page_preview: true,
+      message_thread_id: LIVE_TRADES_TOPIC_ID
+    };
+
     try {
       if (gifUrl) {
-        await bot.sendAnimation(CLUB_GROUP_CHAT_ID, gifUrl, { caption: message, parse_mode: "Markdown" });
+        await bot.sendAnimation(CLUB_GROUP_CHAT_ID, gifUrl, {
+          caption: message,
+          parse_mode: "Markdown",
+          message_thread_id: LIVE_TRADES_TOPIC_ID
+        });
       } else {
-        await bot.sendMessage(CLUB_GROUP_CHAT_ID, message, opts);
+        await bot.sendMessage(CLUB_GROUP_CHAT_ID, message, topicOpts);
       }
     } catch (err) {
-      console.error("Send failed to CLUB group:", err.message);
-      try { await bot.sendMessage(CLUB_GROUP_CHAT_ID, message, opts); } catch (e) {}
+      console.error("Send failed to LIVE TRADES topic:", err.message);
+      try {
+        await bot.sendMessage(CLUB_GROUP_CHAT_ID, message, topicOpts);
+      } catch (e) {}
     }
   }
 }
-// =================================================================
+// ==============================================================================
 
 const BUY_GIFS = { CLUB: BUY_GIF_URL, BOLT: BOLT_BUY_GIF_URL, DYNO: DYNO_BUY_GIF_URL, CORE: CORE_BUY_GIF_URL, USDT: USDT_BUY_GIF_URL, USDC: USDC_BUY_GIF_URL };
 const SELL_GIFS = { CLUB: CLUB_SELL_GIF_URL, BOLT: BOLT_SELL_GIF_URL, DYNO: DYNO_SELL_GIF_URL, CORE: CORE_SELL_GIF_URL, USDT: USDT_SELL_GIF_URL, USDC: USDC_SELL_GIF_URL };
@@ -532,7 +543,7 @@ async function start() {
   console.log("Bot starting...");
   console.log(`Watching ${wetnPools.length} WETN pools + ${crossPools.length} cross pools`);
   console.log(`Main group: ${CHAT_ID}`);
-  console.log(`CLUB group: ${CLUB_GROUP_CHAT_ID} (≥ $10 only)`);
+  console.log(`CLUB group: ${CLUB_GROUP_CHAT_ID} → LIVE TRADES topic (${LIVE_TRADES_TOPIC_ID}) ≥ $10`);
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
