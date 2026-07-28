@@ -6,6 +6,7 @@ const RPC = "https://rpc.ankr.com/electroneum";
 const WETN = "0x138DAFbDA0CCB3d8E39C19edb0510Fc31b7C1c77";
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
+const CLUB_GROUP_CHAT_ID = process.env.CLUB_GROUP_CHAT_ID || "-1002386155004";
 
 const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.mp4";
 const CLUB_SELL_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_sell.mp4";
@@ -143,10 +144,8 @@ async function updatePrice() {
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const receiptCache = new Map();
 
-// ====================== FIXED getReceipt with retries + logging ======================
 async function getReceipt(txHash) {
   if (receiptCache.has(txHash)) return receiptCache.get(txHash);
-
   const maxAttempts = 3;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -157,16 +156,13 @@ async function getReceipt(txHash) {
         return receipt;
       }
     } catch (e) {
-      console.log(`⚠️ getReceipt attempt ${attempt}/${maxAttempts} failed for ${txHash.slice(0, 10)}: ${e.message}`);
+      console.log(`⚠️ getReceipt attempt ${attempt}/${maxAttempts} failed for ${txHash.slice(0,10)}: ${e.message}`);
     }
-    if (attempt < maxAttempts) {
-      await new Promise(r => setTimeout(r, 500 * attempt));
-    }
+    if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 500 * attempt));
   }
-  console.log(`❌ Could not fetch receipt for ${txHash.slice(0, 10)} after ${maxAttempts} attempts`);
+  console.log(`❌ Could not fetch receipt for ${txHash.slice(0,10)} after ${maxAttempts} attempts`);
   return null;
 }
-// =====================================================================================
 
 async function getTraderWallet(txHash) {
   const receipt = await getReceipt(txHash);
@@ -188,34 +184,11 @@ function transferInvolvesWallet(receipt, tokenAddress, wallet, direction) {
   return false;
 }
 
-function getRealTokenAmount(receipt, tokenAddress, wallet, direction, decimals) {
-  if (!receipt) return 0;
-  const walletTopic = walletTopicOf(wallet);
-  let total = 0n;
-
-  for (const log of receipt.logs) {
-    if (log.address.toLowerCase() !== tokenAddress.toLowerCase()) continue;
-    if (log.topics[0] !== TRANSFER_TOPIC) continue;
-
-    const isFrom = log.topics[1].toLowerCase() === walletTopic;
-    const isTo = log.topics[2].toLowerCase() === walletTopic;
-
-    if ((direction === "from" && isFrom) || (direction === "to" && isTo)) {
-      const value = BigInt(log.data);
-      total += value;
-    }
-  }
-
-  return Number(ethers.formatUnits(total, decimals));
-}
-
-// ====================== Restored real isGenuineLeg ======================
 async function isGenuineLeg(txHash, wallet, tokenAddress, direction) {
   const receipt = await getReceipt(txHash);
   if (!receipt) return false;
   return transferInvolvesWallet(receipt, tokenAddress, wallet, direction);
 }
-// ========================================================================
 
 function walletLinkParts(wallet) {
   const link = "https://blockexplorer.electroneum.com/address/" + wallet;
@@ -270,8 +243,11 @@ function formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, txHash, wa
     "🔄 [Trade " + symbolIn + "→" + symbolOut + "](" + tradeLink + ") | ⚡ [Live Txs](" + liveTxsLink + ")";
 }
 
-async function sendMessageWithOptionalGif(message, gifUrl) {
+// ====================== SEND TO BOTH GROUPS ======================
+async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0) {
   const opts = { parse_mode: "Markdown", disable_web_page_preview: true };
+
+  // Main group - always
   try {
     if (gifUrl) {
       await bot.sendAnimation(CHAT_ID, gifUrl, { caption: message, parse_mode: "Markdown" });
@@ -279,14 +255,25 @@ async function sendMessageWithOptionalGif(message, gifUrl) {
       await bot.sendMessage(CHAT_ID, message, opts);
     }
   } catch (err) {
-    console.error("Send failed, falling back to text:", err.message);
+    console.error("Send failed to main group:", err.message);
+    try { await bot.sendMessage(CHAT_ID, message, opts); } catch (e) {}
+  }
+
+  // CLUB group - only if ≥ $10
+  if (usdValue >= 10) {
     try {
-      await bot.sendMessage(CHAT_ID, message, opts);
-    } catch (err2) {
-      console.error("Fallback also failed:", err2.message);
+      if (gifUrl) {
+        await bot.sendAnimation(CLUB_GROUP_CHAT_ID, gifUrl, { caption: message, parse_mode: "Markdown" });
+      } else {
+        await bot.sendMessage(CLUB_GROUP_CHAT_ID, message, opts);
+      }
+    } catch (err) {
+      console.error("Send failed to CLUB group:", err.message);
+      try { await bot.sendMessage(CLUB_GROUP_CHAT_ID, message, opts); } catch (e) {}
     }
   }
 }
+// =================================================================
 
 const BUY_GIFS = { CLUB: BUY_GIF_URL, BOLT: BOLT_BUY_GIF_URL, DYNO: DYNO_BUY_GIF_URL, CORE: CORE_BUY_GIF_URL, USDT: USDT_BUY_GIF_URL, USDC: USDC_BUY_GIF_URL };
 const SELL_GIFS = { CLUB: CLUB_SELL_GIF_URL, BOLT: BOLT_SELL_GIF_URL, DYNO: DYNO_SELL_GIF_URL, CORE: CORE_SELL_GIF_URL, USDT: USDT_SELL_GIF_URL, USDC: USDC_SELL_GIF_URL };
@@ -320,17 +307,19 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
     if (seenKeys.has(key)) continue;
 
     const a0In = event.args[1], a1In = event.args[2], a0Out = event.args[3], a1Out = event.args[4];
-    let isBuy, wetnAmount;
+    let isBuy, wetnAmount, tokenAmount;
 
     if (p.wetnIsToken0) {
       isBuy = a0In > 0n;
       wetnAmount = Number(ethers.formatUnits(isBuy ? a0In : a0Out, 18));
+      tokenAmount = Number(ethers.formatUnits(isBuy ? a1Out : a1In, dec));
     } else {
       isBuy = a1In > 0n && a0Out > 0n;
       wetnAmount = Number(ethers.formatUnits(isBuy ? a1In : a1Out, 18));
+      tokenAmount = Number(ethers.formatUnits(isBuy ? a0Out : a0In, dec));
     }
 
-    if (wetnAmount < 0.000001) { seenKeys.add(key); continue; }
+    if (tokenAmount < 0.000001 || wetnAmount < 0.000001) { seenKeys.add(key); continue; }
 
     const wallet = await getTraderWallet(event.transactionHash);
     if (!wallet) {
@@ -346,19 +335,13 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
       continue;
     }
 
-    const receipt = await getReceipt(event.transactionHash);
-    const tokenAmount = getRealTokenAmount(receipt, p.token, wallet, direction, dec);
-
-    if (tokenAmount < 0.000001) {
-      seenKeys.add(key);
-      continue;
-    }
+    const usdValue = wetnAmount * etnPriceUsd;
 
     seenKeys.add(key);
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
-    await sendMessageWithOptionalGif(message, gifUrl);
-    console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} ${tokenAmount.toFixed(4)} [v2]`);
+    await sendMessageWithOptionalGif(message, gifUrl, usdValue);
+    console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} [v2]`);
   }
 }
 
@@ -378,8 +361,9 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
 
     const isBuy = tokenRaw < 0n;
     const wetnAmount = Number(ethers.formatUnits(wetnRaw < 0n ? -wetnRaw : wetnRaw, 18));
+    const tokenAmount = Number(ethers.formatUnits(tokenRaw < 0n ? -tokenRaw : tokenRaw, dec));
 
-    if (wetnAmount < 0.000001) { seenKeys.add(key); continue; }
+    if (tokenAmount < 0.000001 || wetnAmount < 0.000001) { seenKeys.add(key); continue; }
 
     const wallet = await getTraderWallet(event.transactionHash);
     if (!wallet) {
@@ -395,19 +379,13 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
       continue;
     }
 
-    const receipt = await getReceipt(event.transactionHash);
-    const tokenAmount = getRealTokenAmount(receipt, p.token, wallet, direction, dec);
-
-    if (tokenAmount < 0.000001) {
-      seenKeys.add(key);
-      continue;
-    }
+    const usdValue = wetnAmount * etnPriceUsd;
 
     seenKeys.add(key);
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
-    await sendMessageWithOptionalGif(message, gifUrl);
-    console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} ${tokenAmount.toFixed(4)} [v3]`);
+    await sendMessageWithOptionalGif(message, gifUrl, usdValue);
+    console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} [v3]`);
   }
 }
 
@@ -449,10 +427,7 @@ async function checkCrossPoolV2(p, fromBlock, toBlock) {
     if (amountIn < 0.000001 || amountOut < 0.000001) { seenKeys.add(key); continue; }
 
     const wallet = await getTraderWallet(event.transactionHash);
-    if (!wallet) {
-      console.log(`⚠️ No wallet for cross tx ${event.transactionHash.slice(0,10)}`);
-      continue;
-    }
+    if (!wallet) continue;
 
     const genuineIn = await isGenuineLeg(event.transactionHash, wallet, ADDR[symbolIn], "from");
     if (!genuineIn) {
@@ -460,10 +435,14 @@ async function checkCrossPoolV2(p, fromBlock, toBlock) {
       continue;
     }
 
+    let usdValue = 0;
+    if (STABLES.includes(symbolIn)) usdValue = amountIn;
+    else if (STABLES.includes(symbolOut)) usdValue = amountOut;
+
     seenKeys.add(key);
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
-    await sendMessageWithOptionalGif(message, gifUrl);
+    await sendMessageWithOptionalGif(message, gifUrl, usdValue);
     console.log(`✅ Sent cross ${symbolIn}→${symbolOut}`);
   }
 }
@@ -497,10 +476,7 @@ async function checkCrossPoolV3(p, fromBlock, toBlock) {
     if (amountIn < 0.000001 || amountOut < 0.000001) { seenKeys.add(key); continue; }
 
     const wallet = await getTraderWallet(event.transactionHash);
-    if (!wallet) {
-      console.log(`⚠️ No wallet for cross tx ${event.transactionHash.slice(0,10)}`);
-      continue;
-    }
+    if (!wallet) continue;
 
     const genuineIn = await isGenuineLeg(event.transactionHash, wallet, ADDR[symbolIn], "from");
     if (!genuineIn) {
@@ -508,10 +484,14 @@ async function checkCrossPoolV3(p, fromBlock, toBlock) {
       continue;
     }
 
+    let usdValue = 0;
+    if (STABLES.includes(symbolIn)) usdValue = amountIn;
+    else if (STABLES.includes(symbolOut)) usdValue = amountOut;
+
     seenKeys.add(key);
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
-    await sendMessageWithOptionalGif(message, gifUrl);
+    await sendMessageWithOptionalGif(message, gifUrl, usdValue);
     console.log(`✅ Sent cross ${symbolIn}→${symbolOut}`);
   }
 }
@@ -550,7 +530,9 @@ async function checkAllSwaps() {
 
 async function start() {
   console.log("Bot starting...");
-  console.log(`Watching ${wetnPools.length} WETN pools and ${crossPools.length} cross pools`);
+  console.log(`Watching ${wetnPools.length} WETN pools + ${crossPools.length} cross pools`);
+  console.log(`Main group: ${CHAT_ID}`);
+  console.log(`CLUB group: ${CLUB_GROUP_CHAT_ID} (≥ $10 only)`);
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
