@@ -4,10 +4,11 @@ const http = require("http");
 
 const RPC = "https://rpc.ankr.com/electroneum";
 const WETN = "0x138DAFbDA0CCB3d8E39C19edb0510Fc31b7C1c77";
+const ROUTER_ADDRESS = "0x2c12c8f15637b7a182dec202816148a5e767dcec";
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const CLUB_GROUP_CHAT_ID = process.env.CLUB_GROUP_CHAT_ID || "-1002386155004";
-const LIVE_TRADES_TOPIC_ID = 55341; // LIVE TRADES topic
+const LIVE_TRADES_TOPIC_ID = 55341;
 
 const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.mp4";
 const CLUB_SELL_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_sell.mp4";
@@ -183,6 +184,34 @@ function transferInvolvesWallet(receipt, tokenAddress, wallet, direction) {
   return false;
 }
 
+// Improved amount calculation (inspired by the other dev)
+function getBetterTokenAmount(receipt, tokenAddress, wallet, direction, decimals, fallbackAmount) {
+  if (!receipt) return fallbackAmount;
+
+  const walletTopic = walletTopicOf(wallet);
+  let total = 0n;
+  let found = false;
+
+  for (const log of receipt.logs) {
+    if (log.address.toLowerCase() !== tokenAddress.toLowerCase()) continue;
+    if (log.topics[0] !== TRANSFER_TOPIC) continue;
+
+    const isFrom = log.topics[1].toLowerCase() === walletTopic;
+    const isTo = log.topics[2].toLowerCase() === walletTopic;
+
+    if ((direction === "from" && isFrom) || (direction === "to" && isTo)) {
+      total += BigInt(log.data);
+      found = true;
+    }
+  }
+
+  if (found && total > 0n) {
+    return Number(ethers.formatUnits(total, decimals));
+  }
+
+  return fallbackAmount; // fallback to Swap event amount
+}
+
 async function isGenuineLeg(txHash, wallet, tokenAddress, direction) {
   const receipt = await getReceipt(txHash);
   if (!receipt) return false;
@@ -242,11 +271,9 @@ function formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, txHash, wa
     "🔄 [Trade " + symbolIn + "→" + symbolOut + "](" + tradeLink + ") | ⚡ [Live Txs](" + liveTxsLink + ")";
 }
 
-// ====================== SEND FUNCTION WITH TOPIC SUPPORT ======================
 async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0) {
   const opts = { parse_mode: "Markdown", disable_web_page_preview: true };
 
-  // 1. Always send to main group
   try {
     if (gifUrl) {
       await bot.sendAnimation(CHAT_ID, gifUrl, { caption: message, parse_mode: "Markdown" });
@@ -258,7 +285,6 @@ async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0) {
     try { await bot.sendMessage(CHAT_ID, message, opts); } catch (e) {}
   }
 
-  // 2. Send to LIVE TRADES topic only if ≥ $10
   if (usdValue >= 10) {
     const topicOpts = {
       parse_mode: "Markdown",
@@ -284,7 +310,6 @@ async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0) {
     }
   }
 }
-// ==============================================================================
 
 const BUY_GIFS = { CLUB: BUY_GIF_URL, BOLT: BOLT_BUY_GIF_URL, DYNO: DYNO_BUY_GIF_URL, CORE: CORE_BUY_GIF_URL, USDT: USDT_BUY_GIF_URL, USDC: USDC_BUY_GIF_URL };
 const SELL_GIFS = { CLUB: CLUB_SELL_GIF_URL, BOLT: BOLT_SELL_GIF_URL, DYNO: DYNO_SELL_GIF_URL, CORE: CORE_SELL_GIF_URL, USDT: USDT_SELL_GIF_URL, USDC: USDC_SELL_GIF_URL };
@@ -318,19 +343,19 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
     if (seenKeys.has(key)) continue;
 
     const a0In = event.args[1], a1In = event.args[2], a0Out = event.args[3], a1Out = event.args[4];
-    let isBuy, wetnAmount, tokenAmount;
+    let isBuy, wetnAmount, tokenAmountFromSwap;
 
     if (p.wetnIsToken0) {
       isBuy = a0In > 0n;
       wetnAmount = Number(ethers.formatUnits(isBuy ? a0In : a0Out, 18));
-      tokenAmount = Number(ethers.formatUnits(isBuy ? a1Out : a1In, dec));
+      tokenAmountFromSwap = Number(ethers.formatUnits(isBuy ? a1Out : a1In, dec));
     } else {
       isBuy = a1In > 0n && a0Out > 0n;
       wetnAmount = Number(ethers.formatUnits(isBuy ? a1In : a1Out, 18));
-      tokenAmount = Number(ethers.formatUnits(isBuy ? a0Out : a0In, dec));
+      tokenAmountFromSwap = Number(ethers.formatUnits(isBuy ? a0Out : a0In, dec));
     }
 
-    if (tokenAmount < 0.000001 || wetnAmount < 0.000001) { seenKeys.add(key); continue; }
+    if (tokenAmountFromSwap < 0.000001 || wetnAmount < 0.000001) { seenKeys.add(key); continue; }
 
     const wallet = await getTraderWallet(event.transactionHash);
     if (!wallet) {
@@ -346,13 +371,17 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
       continue;
     }
 
+    // Better amount calculation
+    const receipt = await getReceipt(event.transactionHash);
+    const tokenAmount = getBetterTokenAmount(receipt, p.token, wallet, direction, dec, tokenAmountFromSwap);
+
     const usdValue = wetnAmount * etnPriceUsd;
 
     seenKeys.add(key);
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
     await sendMessageWithOptionalGif(message, gifUrl, usdValue);
-    console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} [v2]`);
+    console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} | Amount: ${tokenAmount.toFixed(4)} [v2]`);
   }
 }
 
@@ -372,9 +401,9 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
 
     const isBuy = tokenRaw < 0n;
     const wetnAmount = Number(ethers.formatUnits(wetnRaw < 0n ? -wetnRaw : wetnRaw, 18));
-    const tokenAmount = Number(ethers.formatUnits(tokenRaw < 0n ? -tokenRaw : tokenRaw, dec));
+    const tokenAmountFromSwap = Number(ethers.formatUnits(tokenRaw < 0n ? -tokenRaw : tokenRaw, dec));
 
-    if (tokenAmount < 0.000001 || wetnAmount < 0.000001) { seenKeys.add(key); continue; }
+    if (tokenAmountFromSwap < 0.000001 || wetnAmount < 0.000001) { seenKeys.add(key); continue; }
 
     const wallet = await getTraderWallet(event.transactionHash);
     if (!wallet) {
@@ -390,13 +419,16 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
       continue;
     }
 
+    const receipt = await getReceipt(event.transactionHash);
+    const tokenAmount = getBetterTokenAmount(receipt, p.token, wallet, direction, dec, tokenAmountFromSwap);
+
     const usdValue = wetnAmount * etnPriceUsd;
 
     seenKeys.add(key);
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
     await sendMessageWithOptionalGif(message, gifUrl, usdValue);
-    console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} [v3]`);
+    console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} | Amount: ${tokenAmount.toFixed(4)} [v3]`);
   }
 }
 
@@ -544,6 +576,7 @@ async function start() {
   console.log(`Watching ${wetnPools.length} WETN pools + ${crossPools.length} cross pools`);
   console.log(`Main group: ${CHAT_ID}`);
   console.log(`CLUB group: ${CLUB_GROUP_CHAT_ID} → LIVE TRADES topic (${LIVE_TRADES_TOPIC_ID}) ≥ $10`);
+  console.log(`Router: ${ROUTER_ADDRESS}`);
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
