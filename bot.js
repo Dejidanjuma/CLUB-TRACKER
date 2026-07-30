@@ -212,6 +212,42 @@ function getBetterTokenAmount(receipt, tokenAddress, wallet, direction, decimals
   return fallbackAmount; // fallback to Swap event amount
 }
 
+// --- WETN Deposit/Withdrawal net-amount fix ---
+const WETN_DEPOSIT_TOPIC = ethers.id("Deposit(address,uint256)");
+const WETN_WITHDRAWAL_TOPIC = ethers.id("Withdrawal(address,uint256)");
+
+function getNetWetnAmount(receipt, isBuy, fallbackAmount) {
+  if (!receipt) return fallbackAmount;
+
+  let deposited = 0n;
+  let withdrawn = 0n;
+  let sawDeposit = false;
+  let sawWithdrawal = false;
+
+  for (const log of receipt.logs) {
+    if (log.address.toLowerCase() !== WETN.toLowerCase()) continue;
+
+    if (log.topics[0] === WETN_DEPOSIT_TOPIC) {
+      deposited += BigInt(log.data);
+      sawDeposit = true;
+    } else if (log.topics[0] === WETN_WITHDRAWAL_TOPIC) {
+      withdrawn += BigInt(log.data);
+      sawWithdrawal = true;
+    }
+  }
+
+  if (isBuy) {
+    if (!sawDeposit) return fallbackAmount;
+    const net = deposited - withdrawn;
+    if (net <= 0n) return fallbackAmount;
+    return Number(ethers.formatUnits(net, 18));
+  } else {
+    if (!sawWithdrawal) return fallbackAmount;
+    return Number(ethers.formatUnits(withdrawn, 18));
+  }
+}
+// --- end WETN Deposit/Withdrawal net-amount fix ---
+
 async function isGenuineLeg(txHash, wallet, tokenAddress, direction) {
   const receipt = await getReceipt(txHash);
   if (!receipt) return false;
@@ -374,6 +410,7 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
     // Better amount calculation
     const receipt = await getReceipt(event.transactionHash);
     const tokenAmount = getBetterTokenAmount(receipt, p.token, wallet, direction, dec, tokenAmountFromSwap);
+    wetnAmount = getNetWetnAmount(receipt, isBuy, wetnAmount);
 
     const usdValue = wetnAmount * etnPriceUsd;
 
@@ -400,7 +437,7 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
     const tokenRaw = p.wetnIsToken0 ? amount1 : amount0;
 
     const isBuy = tokenRaw < 0n;
-    const wetnAmount = Number(ethers.formatUnits(wetnRaw < 0n ? -wetnRaw : wetnRaw, 18));
+    let wetnAmount = Number(ethers.formatUnits(wetnRaw < 0n ? -wetnRaw : wetnRaw, 18));
     const tokenAmountFromSwap = Number(ethers.formatUnits(tokenRaw < 0n ? -tokenRaw : tokenRaw, dec));
 
     if (tokenAmountFromSwap < 0.000001 || wetnAmount < 0.000001) { seenKeys.add(key); continue; }
@@ -421,6 +458,7 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
 
     const receipt = await getReceipt(event.transactionHash);
     const tokenAmount = getBetterTokenAmount(receipt, p.token, wallet, direction, dec, tokenAmountFromSwap);
+    wetnAmount = getNetWetnAmount(receipt, isBuy, wetnAmount);
 
     const usdValue = wetnAmount * etnPriceUsd;
 
