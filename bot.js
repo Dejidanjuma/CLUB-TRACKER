@@ -12,7 +12,7 @@ const LIVE_TRADES_TOPIC_ID = 55341;
 
 // ====================== TEMPORARY DEBUG CONFIG ======================
 const DEBUG_WALLET = "0x25DdC44e468660A39dba30588F4330748558BaC1".toLowerCase();
-const DEBUG_ENABLED = true; // set to false to disable all extra logs
+const DEBUG_ENABLED = true;
 // ====================================================================
 
 const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.mp4";
@@ -97,6 +97,40 @@ let etnPriceUsd = 0.0008;
 let lastBlock = null;
 const tokenDecimals = {};
 const seenKeys = new Set();
+
+// ====================== TRANSACTION-LEVEL DEBUG COLLECTOR ======================
+const debugTxMap = new Map(); // txHash -> array of pool results
+
+function shouldDebug(wallet) {
+  return DEBUG_ENABLED && wallet && wallet.toLowerCase() === DEBUG_WALLET;
+}
+
+function recordPoolResult(txHash, info) {
+  if (!debugTxMap.has(txHash)) debugTxMap.set(txHash, []);
+  debugTxMap.get(txHash).push(info);
+}
+
+function printTxSummary(txHash) {
+  const results = debugTxMap.get(txHash) || [];
+  console.log(`\n========== TRANSACTION SUMMARY: ${txHash} ==========`);
+  console.log(`Total pools processed for this tx: ${results.length}`);
+  results.forEach((r, i) => {
+    console.log(`\n--- Pool #${i + 1} ---`);
+    console.log(`  Pool: ${r.pool} (${r.symbol || r.symbolA + "/" + r.symbolB})`);
+    console.log(`  Version: ${r.version}`);
+    console.log(`  Function entered: ${r.functionEntered}`);
+    console.log(`  Swap event decoded: ${r.swapDecoded}`);
+    console.log(`  Wallet: ${r.wallet}`);
+    console.log(`  isBuy: ${r.isBuy}`);
+    console.log(`  isGenuineLeg: ${r.genuine}`);
+    console.log(`  seenKeys already had key: ${r.alreadySeen}`);
+    console.log(`  Exit reason: ${r.exitReason}`);
+    console.log(`  Reached formatWetnMessage / formatCrossMessage: ${r.reachedFormat}`);
+    console.log(`  Reached sendMessageWithOptionalGif: ${r.reachedSend}`);
+  });
+  console.log(`====================================================\n`);
+}
+// ==============================================================================
 
 function fmt(num, decimals) {
   return num.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
@@ -191,28 +225,20 @@ function transferInvolvesWallet(receipt, tokenAddress, wallet, direction) {
 
 function getBetterTokenAmount(receipt, tokenAddress, wallet, direction, decimals, fallbackAmount) {
   if (!receipt) return fallbackAmount;
-
   const walletTopic = walletTopicOf(wallet);
   let total = 0n;
   let found = false;
-
   for (const log of receipt.logs) {
     if (log.address.toLowerCase() !== tokenAddress.toLowerCase()) continue;
     if (log.topics[0] !== TRANSFER_TOPIC) continue;
-
     const isFrom = log.topics[1].toLowerCase() === walletTopic;
     const isTo = log.topics[2].toLowerCase() === walletTopic;
-
     if ((direction === "from" && isFrom) || (direction === "to" && isTo)) {
       total += BigInt(log.data);
       found = true;
     }
   }
-
-  if (found && total > 0n) {
-    return Number(ethers.formatUnits(total, decimals));
-  }
-
+  if (found && total > 0n) return Number(ethers.formatUnits(total, decimals));
   return fallbackAmount;
 }
 
@@ -221,15 +247,12 @@ const WETN_WITHDRAWAL_TOPIC = ethers.id("Withdrawal(address,uint256)");
 
 function getNetWetnAmount(receipt, isBuy, fallbackAmount) {
   if (!receipt) return fallbackAmount;
-
   let deposited = 0n;
   let withdrawn = 0n;
   let sawDeposit = false;
   let sawWithdrawal = false;
-
   for (const log of receipt.logs) {
     if (log.address.toLowerCase() !== WETN.toLowerCase()) continue;
-
     if (log.topics[0] === WETN_DEPOSIT_TOPIC) {
       deposited += BigInt(log.data);
       sawDeposit = true;
@@ -238,7 +261,6 @@ function getNetWetnAmount(receipt, isBuy, fallbackAmount) {
       sawWithdrawal = true;
     }
   }
-
   if (isBuy) {
     if (!sawDeposit) return fallbackAmount;
     const net = deposited - withdrawn;
@@ -268,12 +290,10 @@ function formatWetnMessage(symbol, isBuy, wetnAmount, tokenAmount, txHash, walle
   const circles = buildCircles(isBuy, usdValue);
   const label = isBuy ? "BUY" : "SELL";
   const roleLabel = isBuy ? "Buyer" : "Seller";
-
   const txLink = "https://blockexplorer.electroneum.com/tx/" + txHash;
   const { link: walletLink, short: walletShort } = walletLinkParts(wallet);
   const buyLink = `https://app.electroswap.io/swap?inputCurrency=${WETN}&outputCurrency=${ADDR[symbol]}`;
   const liveTxsLink = "https://blockexplorer.electroneum.com/address/" + poolAddress;
-
   let msg = circles + "\n*" + symbol + " " + label + "* ($" + fmt(usdValue, 2) + ")\n\n" +
     "💰 *" + (isBuy ? "Paid" : "Received") + ":* " + fmt(wetnAmount, 4) + " WETN\n" +
     "🔢 *Amount:* " + fmt(tokenAmount, 6) + " " + symbol + "\n" +
@@ -282,7 +302,6 @@ function formatWetnMessage(symbol, isBuy, wetnAmount, tokenAmount, txHash, walle
     "🔗 [View Transaction](" + txLink + ")\n\n" +
     "━━━━━━━━━━━━━━━━━━━━━━\n\n" +
     "💵 [Buy " + symbol + "](" + buyLink + ") | ⚡ [Live Txs](" + liveTxsLink + ")";
-
   if (website) msg += "\n🌎 [" + websiteLabel + "](" + website + ")";
   return msg;
 }
@@ -292,13 +311,10 @@ function formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, txHash, wa
   const { link: walletLink, short: walletShort } = walletLinkParts(wallet);
   const liveTxsLink = "https://blockexplorer.electroneum.com/address/" + poolAddress;
   const tradeLink = `https://app.electroswap.io/swap?inputCurrency=${ADDR[symbolIn]}&outputCurrency=${ADDR[symbolOut]}`;
-
   let usdLine = "";
   if (STABLES.includes(symbolIn)) usdLine = "💵 *Value:* $" + fmt(amountIn, 2) + "\n";
   else if (STABLES.includes(symbolOut)) usdLine = "💵 *Value:* $" + fmt(amountOut, 2) + "\n";
-
   const circles = "🔵".repeat(10);
-
   return circles + "\n*" + symbolIn + " → " + symbolOut + " SWAP*\n\n" +
     "💰 *Paid:* " + fmt(amountIn, 6) + " " + symbolIn + "\n" +
     "🔢 *Received:* " + fmt(amountOut, 6) + " " + symbolOut + "\n" +
@@ -311,7 +327,6 @@ function formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, txHash, wa
 
 async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0) {
   const opts = { parse_mode: "Markdown", disable_web_page_preview: true };
-
   try {
     if (gifUrl) {
       await bot.sendAnimation(CHAT_ID, gifUrl, { caption: message, parse_mode: "Markdown" });
@@ -322,14 +337,12 @@ async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0) {
     console.error("Send failed to main group:", err.message);
     try { await bot.sendMessage(CHAT_ID, message, opts); } catch (e) {}
   }
-
   if (usdValue >= 10) {
     const topicOpts = {
       parse_mode: "Markdown",
       disable_web_page_preview: true,
       message_thread_id: LIVE_TRADES_TOPIC_ID
     };
-
     try {
       if (gifUrl) {
         await bot.sendAnimation(CLUB_GROUP_CHAT_ID, gifUrl, {
@@ -342,9 +355,7 @@ async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0) {
       }
     } catch (err) {
       console.error("Send failed to LIVE TRADES topic:", err.message);
-      try {
-        await bot.sendMessage(CLUB_GROUP_CHAT_ID, message, topicOpts);
-      } catch (e) {}
+      try { await bot.sendMessage(CLUB_GROUP_CHAT_ID, message, topicOpts); } catch (e) {}
     }
   }
 }
@@ -371,16 +382,6 @@ function makeKey(txHash, logIndex) {
   return txHash + "-" + logIndex;
 }
 
-// ====================== DEBUG HELPER ======================
-function shouldDebug(wallet) {
-  return DEBUG_ENABLED && wallet && wallet.toLowerCase() === DEBUG_WALLET;
-}
-
-function debugLog(msg) {
-  console.log(`[DEBUG] ${msg}`);
-}
-// ==========================================================
-
 async function checkWetnPoolV2(p, fromBlock, toBlock) {
   const pool = new ethers.Contract(p.pool, v2Abi, provider);
   const events = await pool.queryFilter("Swap", fromBlock, toBlock);
@@ -389,7 +390,6 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
   for (const event of events) {
     const key = makeKey(event.transactionHash, event.logIndex);
     const alreadySeen = seenKeys.has(key);
-
     if (alreadySeen) continue;
 
     const a0In = event.args[1], a1In = event.args[2], a0Out = event.args[3], a1Out = event.args[4];
@@ -411,42 +411,33 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
     }
 
     const wallet = await getTraderWallet(event.transactionHash);
-
-    // ----- DEBUG START -----
     const dbg = shouldDebug(wallet);
-    if (dbg) {
-      debugLog(`========== WETN V2 DEBUG ==========`);
-      debugLog(`txHash: ${event.transactionHash}`);
-      debugLog(`block: ${event.blockNumber}`);
-      debugLog(`pool: ${p.pool} (${p.symbol})`);
-      debugLog(`pool version: V2`);
-      debugLog(`Swap event detected: YES`);
-      debugLog(`seenKeys already contained key: ${alreadySeen}`);
-      debugLog(`wallet from getTraderWallet(): ${wallet}`);
-    }
-    // ----- DEBUG END -----
 
     if (!wallet) {
-      if (dbg) debugLog(`SKIP reason: No wallet returned by getTraderWallet()`);
-      console.log(`⚠️ No wallet for ${p.symbol} tx ${event.transactionHash.slice(0,10)}`);
+      if (dbg) {
+        recordPoolResult(event.transactionHash, {
+          pool: p.pool, symbol: p.symbol, version: "V2",
+          functionEntered: "checkWetnPoolV2", swapDecoded: true,
+          wallet: null, isBuy, genuine: null, alreadySeen: false,
+          exitReason: "No wallet from getTraderWallet()",
+          reachedFormat: false, reachedSend: false
+        });
+      }
       continue;
     }
 
     const direction = isBuy ? "to" : "from";
     const genuine = await isGenuineLeg(event.transactionHash, wallet, p.token, direction);
 
-    if (dbg) {
-      debugLog(`isBuy: ${isBuy}`);
-      debugLog(`direction for isGenuineLeg: ${direction}`);
-      debugLog(`isGenuineLeg() result: ${genuine}`);
-      debugLog(`tokenAmountFromSwap (raw): ${tokenAmountFromSwap}`);
-      debugLog(`wetnAmount (before getNetWetnAmount): ${wetnAmount}`);
-    }
-
     if (!genuine) {
       if (dbg) {
-        debugLog(`SKIP reason: isGenuineLeg() returned false → intermediate hop`);
-        debugLog(`Final decision: Skipped because: intermediate hop [v2]`);
+        recordPoolResult(event.transactionHash, {
+          pool: p.pool, symbol: p.symbol, version: "V2",
+          functionEntered: "checkWetnPoolV2", swapDecoded: true,
+          wallet, isBuy, genuine: false, alreadySeen: false,
+          exitReason: "isGenuineLeg() returned false (intermediate hop)",
+          reachedFormat: false, reachedSend: false
+        });
       }
       console.log(`⏭️ Skipped ${p.symbol} ${isBuy ? "BUY" : "SELL"} (intermediate hop) [v2]`);
       seenKeys.add(key);
@@ -455,29 +446,22 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
 
     const receipt = await getReceipt(event.transactionHash);
     const tokenAmount = getBetterTokenAmount(receipt, p.token, wallet, direction, dec, tokenAmountFromSwap);
-    const wetnBefore = wetnAmount;
     wetnAmount = getNetWetnAmount(receipt, isBuy, wetnAmount);
-
-    if (dbg) {
-      debugLog(`tokenAmount after getBetterTokenAmount(): ${tokenAmount}`);
-      debugLog(`WETN amount before getNetWetnAmount(): ${wetnBefore}`);
-      debugLog(`WETN amount after getNetWetnAmount(): ${wetnAmount}`);
-    }
-
     const usdValue = wetnAmount * etnPriceUsd;
 
     seenKeys.add(key);
-
-    if (dbg) debugLog(`Reached formatWetnMessage()`);
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
-
-    if (dbg) debugLog(`Reached sendMessageWithOptionalGif()`);
     await sendMessageWithOptionalGif(message, gifUrl, usdValue);
 
     if (dbg) {
-      debugLog(`Final decision: Notification sent`);
-      debugLog(`====================================`);
+      recordPoolResult(event.transactionHash, {
+        pool: p.pool, symbol: p.symbol, version: "V2",
+        functionEntered: "checkWetnPoolV2", swapDecoded: true,
+        wallet, isBuy, genuine: true, alreadySeen: false,
+        exitReason: "Notification sent",
+        reachedFormat: true, reachedSend: true
+      });
     }
     console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} | Amount: ${tokenAmount.toFixed(4)} [v2]`);
   }
@@ -491,7 +475,6 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
   for (const event of events) {
     const key = makeKey(event.transactionHash, event.logIndex);
     const alreadySeen = seenKeys.has(key);
-
     if (alreadySeen) continue;
 
     const amount0 = event.args[2];
@@ -509,42 +492,33 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
     }
 
     const wallet = await getTraderWallet(event.transactionHash);
-
-    // ----- DEBUG START -----
     const dbg = shouldDebug(wallet);
-    if (dbg) {
-      debugLog(`========== WETN V3 DEBUG ==========`);
-      debugLog(`txHash: ${event.transactionHash}`);
-      debugLog(`block: ${event.blockNumber}`);
-      debugLog(`pool: ${p.pool} (${p.symbol})`);
-      debugLog(`pool version: V3`);
-      debugLog(`Swap event detected: YES`);
-      debugLog(`seenKeys already contained key: ${alreadySeen}`);
-      debugLog(`wallet from getTraderWallet(): ${wallet}`);
-    }
-    // ----- DEBUG END -----
 
     if (!wallet) {
-      if (dbg) debugLog(`SKIP reason: No wallet returned by getTraderWallet()`);
-      console.log(`⚠️ No wallet for ${p.symbol} tx ${event.transactionHash.slice(0,10)}`);
+      if (dbg) {
+        recordPoolResult(event.transactionHash, {
+          pool: p.pool, symbol: p.symbol, version: "V3",
+          functionEntered: "checkWetnPoolV3", swapDecoded: true,
+          wallet: null, isBuy, genuine: null, alreadySeen: false,
+          exitReason: "No wallet from getTraderWallet()",
+          reachedFormat: false, reachedSend: false
+        });
+      }
       continue;
     }
 
     const direction = isBuy ? "to" : "from";
     const genuine = await isGenuineLeg(event.transactionHash, wallet, p.token, direction);
 
-    if (dbg) {
-      debugLog(`isBuy: ${isBuy}`);
-      debugLog(`direction for isGenuineLeg: ${direction}`);
-      debugLog(`isGenuineLeg() result: ${genuine}`);
-      debugLog(`tokenAmountFromSwap (raw): ${tokenAmountFromSwap}`);
-      debugLog(`wetnAmount (before getNetWetnAmount): ${wetnAmount}`);
-    }
-
     if (!genuine) {
       if (dbg) {
-        debugLog(`SKIP reason: isGenuineLeg() returned false → intermediate hop`);
-        debugLog(`Final decision: Skipped because: intermediate hop [v3]`);
+        recordPoolResult(event.transactionHash, {
+          pool: p.pool, symbol: p.symbol, version: "V3",
+          functionEntered: "checkWetnPoolV3", swapDecoded: true,
+          wallet, isBuy, genuine: false, alreadySeen: false,
+          exitReason: "isGenuineLeg() returned false (intermediate hop)",
+          reachedFormat: false, reachedSend: false
+        });
       }
       console.log(`⏭️ Skipped ${p.symbol} ${isBuy ? "BUY" : "SELL"} (intermediate hop) [v3]`);
       seenKeys.add(key);
@@ -553,29 +527,22 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
 
     const receipt = await getReceipt(event.transactionHash);
     const tokenAmount = getBetterTokenAmount(receipt, p.token, wallet, direction, dec, tokenAmountFromSwap);
-    const wetnBefore = wetnAmount;
     wetnAmount = getNetWetnAmount(receipt, isBuy, wetnAmount);
-
-    if (dbg) {
-      debugLog(`tokenAmount after getBetterTokenAmount(): ${tokenAmount}`);
-      debugLog(`WETN amount before getNetWetnAmount(): ${wetnBefore}`);
-      debugLog(`WETN amount after getNetWetnAmount(): ${wetnAmount}`);
-    }
-
     const usdValue = wetnAmount * etnPriceUsd;
 
     seenKeys.add(key);
-
-    if (dbg) debugLog(`Reached formatWetnMessage()`);
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
-
-    if (dbg) debugLog(`Reached sendMessageWithOptionalGif()`);
     await sendMessageWithOptionalGif(message, gifUrl, usdValue);
 
     if (dbg) {
-      debugLog(`Final decision: Notification sent`);
-      debugLog(`====================================`);
+      recordPoolResult(event.transactionHash, {
+        pool: p.pool, symbol: p.symbol, version: "V3",
+        functionEntered: "checkWetnPoolV3", swapDecoded: true,
+        wallet, isBuy, genuine: true, alreadySeen: false,
+        exitReason: "Notification sent",
+        reachedFormat: true, reachedSend: true
+      });
     }
     console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} | Amount: ${tokenAmount.toFixed(4)} [v3]`);
   }
@@ -590,11 +557,9 @@ async function checkCrossPoolV2(p, fromBlock, toBlock) {
   for (const event of events) {
     const key = makeKey(event.transactionHash, event.logIndex);
     const alreadySeen = seenKeys.has(key);
-
     if (alreadySeen) continue;
 
     const a0In = event.args[1], a1In = event.args[2], a0Out = event.args[3], a1Out = event.args[4];
-
     let symbolIn, symbolOut, amountIn, amountOut;
     if (p.aIsToken0) {
       if (a0In > 0n) {
@@ -624,38 +589,32 @@ async function checkCrossPoolV2(p, fromBlock, toBlock) {
     }
 
     const wallet = await getTraderWallet(event.transactionHash);
-
-    // ----- DEBUG START -----
     const dbg = shouldDebug(wallet);
-    if (dbg) {
-      debugLog(`========== CROSS V2 DEBUG ==========`);
-      debugLog(`txHash: ${event.transactionHash}`);
-      debugLog(`block: ${event.blockNumber}`);
-      debugLog(`pool: ${p.pool} (${p.symbolA}/${p.symbolB})`);
-      debugLog(`pool version: V2`);
-      debugLog(`Swap event detected: YES`);
-      debugLog(`seenKeys already contained key: ${alreadySeen}`);
-      debugLog(`wallet from getTraderWallet(): ${wallet}`);
-    }
-    // ----- DEBUG END -----
 
     if (!wallet) {
-      if (dbg) debugLog(`SKIP reason: No wallet returned by getTraderWallet()`);
+      if (dbg) {
+        recordPoolResult(event.transactionHash, {
+          pool: p.pool, symbolA: p.symbolA, symbolB: p.symbolB, version: "V2",
+          functionEntered: "checkCrossPoolV2", swapDecoded: true,
+          wallet: null, isBuy: null, genuine: null, alreadySeen: false,
+          exitReason: "No wallet from getTraderWallet()",
+          reachedFormat: false, reachedSend: false
+        });
+      }
       continue;
     }
 
     const genuineIn = await isGenuineLeg(event.transactionHash, wallet, ADDR[symbolIn], "from");
 
-    if (dbg) {
-      debugLog(`symbolIn: ${symbolIn}, symbolOut: ${symbolOut}`);
-      debugLog(`amountIn: ${amountIn}, amountOut: ${amountOut}`);
-      debugLog(`isGenuineLeg(from) result: ${genuineIn}`);
-    }
-
     if (!genuineIn) {
       if (dbg) {
-        debugLog(`SKIP reason: isGenuineLeg() returned false`);
-        debugLog(`Final decision: Skipped because: intermediate hop [cross v2]`);
+        recordPoolResult(event.transactionHash, {
+          pool: p.pool, symbolA: p.symbolA, symbolB: p.symbolB, version: "V2",
+          functionEntered: "checkCrossPoolV2", swapDecoded: true,
+          wallet, isBuy: null, genuine: false, alreadySeen: false,
+          exitReason: "isGenuineLeg() returned false (intermediate hop)",
+          reachedFormat: false, reachedSend: false
+        });
       }
       seenKeys.add(key);
       continue;
@@ -666,17 +625,18 @@ async function checkCrossPoolV2(p, fromBlock, toBlock) {
     else if (STABLES.includes(symbolOut)) usdValue = amountOut;
 
     seenKeys.add(key);
-
-    if (dbg) debugLog(`Reached formatCrossMessage()`);
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
-
-    if (dbg) debugLog(`Reached sendMessageWithOptionalGif()`);
     await sendMessageWithOptionalGif(message, gifUrl, usdValue);
 
     if (dbg) {
-      debugLog(`Final decision: Notification sent`);
-      debugLog(`====================================`);
+      recordPoolResult(event.transactionHash, {
+        pool: p.pool, symbolA: p.symbolA, symbolB: p.symbolB, version: "V2",
+        functionEntered: "checkCrossPoolV2", swapDecoded: true,
+        wallet, isBuy: null, genuine: true, alreadySeen: false,
+        exitReason: "Notification sent",
+        reachedFormat: true, reachedSend: true
+      });
     }
     console.log(`✅ Sent cross ${symbolIn}→${symbolOut}`);
   }
@@ -691,7 +651,6 @@ async function checkCrossPoolV3(p, fromBlock, toBlock) {
   for (const event of events) {
     const key = makeKey(event.transactionHash, event.logIndex);
     const alreadySeen = seenKeys.has(key);
-
     if (alreadySeen) continue;
 
     const amount0 = event.args[2];
@@ -716,38 +675,32 @@ async function checkCrossPoolV3(p, fromBlock, toBlock) {
     }
 
     const wallet = await getTraderWallet(event.transactionHash);
-
-    // ----- DEBUG START -----
     const dbg = shouldDebug(wallet);
-    if (dbg) {
-      debugLog(`========== CROSS V3 DEBUG ==========`);
-      debugLog(`txHash: ${event.transactionHash}`);
-      debugLog(`block: ${event.blockNumber}`);
-      debugLog(`pool: ${p.pool} (${p.symbolA}/${p.symbolB})`);
-      debugLog(`pool version: V3`);
-      debugLog(`Swap event detected: YES`);
-      debugLog(`seenKeys already contained key: ${alreadySeen}`);
-      debugLog(`wallet from getTraderWallet(): ${wallet}`);
-    }
-    // ----- DEBUG END -----
 
     if (!wallet) {
-      if (dbg) debugLog(`SKIP reason: No wallet returned by getTraderWallet()`);
+      if (dbg) {
+        recordPoolResult(event.transactionHash, {
+          pool: p.pool, symbolA: p.symbolA, symbolB: p.symbolB, version: "V3",
+          functionEntered: "checkCrossPoolV3", swapDecoded: true,
+          wallet: null, isBuy: null, genuine: null, alreadySeen: false,
+          exitReason: "No wallet from getTraderWallet()",
+          reachedFormat: false, reachedSend: false
+        });
+      }
       continue;
     }
 
     const genuineIn = await isGenuineLeg(event.transactionHash, wallet, ADDR[symbolIn], "from");
 
-    if (dbg) {
-      debugLog(`symbolIn: ${symbolIn}, symbolOut: ${symbolOut}`);
-      debugLog(`amountIn: ${amountIn}, amountOut: ${amountOut}`);
-      debugLog(`isGenuineLeg(from) result: ${genuineIn}`);
-    }
-
     if (!genuineIn) {
       if (dbg) {
-        debugLog(`SKIP reason: isGenuineLeg() returned false`);
-        debugLog(`Final decision: Skipped because: intermediate hop [cross v3]`);
+        recordPoolResult(event.transactionHash, {
+          pool: p.pool, symbolA: p.symbolA, symbolB: p.symbolB, version: "V3",
+          functionEntered: "checkCrossPoolV3", swapDecoded: true,
+          wallet, isBuy: null, genuine: false, alreadySeen: false,
+          exitReason: "isGenuineLeg() returned false (intermediate hop)",
+          reachedFormat: false, reachedSend: false
+        });
       }
       seenKeys.add(key);
       continue;
@@ -758,17 +711,18 @@ async function checkCrossPoolV3(p, fromBlock, toBlock) {
     else if (STABLES.includes(symbolOut)) usdValue = amountOut;
 
     seenKeys.add(key);
-
-    if (dbg) debugLog(`Reached formatCrossMessage()`);
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
-
-    if (dbg) debugLog(`Reached sendMessageWithOptionalGif()`);
     await sendMessageWithOptionalGif(message, gifUrl, usdValue);
 
     if (dbg) {
-      debugLog(`Final decision: Notification sent`);
-      debugLog(`====================================`);
+      recordPoolResult(event.transactionHash, {
+        pool: p.pool, symbolA: p.symbolA, symbolB: p.symbolB, version: "V3",
+        functionEntered: "checkCrossPoolV3", swapDecoded: true,
+        wallet, isBuy: null, genuine: true, alreadySeen: false,
+        exitReason: "Notification sent",
+        reachedFormat: true, reachedSend: true
+      });
     }
     console.log(`✅ Sent cross ${symbolIn}→${symbolOut}`);
   }
@@ -780,6 +734,9 @@ async function checkAllSwaps() {
     const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 200;
     if (fromBlock > currentBlock) return;
     console.log(`Checking blocks ${fromBlock} to ${currentBlock}`);
+
+    // Clear previous cycle's debug data
+    debugTxMap.clear();
 
     for (const p of wetnPools) {
       try {
@@ -799,6 +756,11 @@ async function checkAllSwaps() {
       }
     }
 
+    // Print transaction-level summaries for the debug wallet
+    for (const txHash of debugTxMap.keys()) {
+      printTxSummary(txHash);
+    }
+
     lastBlock = currentBlock;
     if (seenKeys.size > 5000) seenKeys.clear();
   } catch (e) {
@@ -812,7 +774,7 @@ async function start() {
   console.log(`Main group: ${CHAT_ID}`);
   console.log(`CLUB group: ${CLUB_GROUP_CHAT_ID} → LIVE TRADES topic (${LIVE_TRADES_TOPIC_ID}) ≥ $10`);
   console.log(`Router: ${ROUTER_ADDRESS}`);
-  console.log(`DEBUG mode: ${DEBUG_ENABLED ? "ON" : "OFF"} for wallet ${DEBUG_WALLET}`);
+  console.log(`DEBUG mode: ON for wallet ${DEBUG_WALLET} (transaction-level summary enabled)`);
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
