@@ -9,6 +9,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const CLUB_GROUP_CHAT_ID = process.env.CLUB_GROUP_CHAT_ID || "-1002386155004";
 const LIVE_TRADES_TOPIC_ID = 55341;
+const BLOCKSCOUT_BASE = "https://blockexplorer.electroneum.com/api/v2";
 
 const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.mp4";
 const CLUB_SELL_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_sell.mp4";
@@ -86,39 +87,149 @@ const crossPools = [
 
 const v2Abi = ["event Swap(address indexed sender, uint amount0In, uint amount1In, uint amount0Out, uint amount1Out, address indexed to)"];
 const v3Abi = ["event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)"];
-const erc20Abi = ["function decimals() view returns (uint8)"];
+const erc20Abi = [
+  "function decimals() view returns (uint8)",
+  "function totalSupply() view returns (uint256)",
+  "function balanceOf(address) view returns (uint256)"
+];
 
 let etnPriceUsd = 0.0008;
 let lastBlock = null;
 const tokenDecimals = {};
 const seenKeys = new Set();
 
-function fmt(num, decimals) {
-  return num.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
-}
+// ====================== CACHES ======================
+const supplyCache = new Map();   // tokenAddress -> { value, ts }
+const holdersCache = new Map();  // tokenAddress -> { value, ts }
+const SUPPLY_TTL = 3 * 60 * 1000;   // 3 minutes
+const HOLDERS_TTL = 8 * 60 * 1000;  // 8 minutes
 
-const CIRCLE_MIN = 1;
-const CIRCLE_MAX = 50;
-const CIRCLE_BASE = 0.08;
-const CIRCLE_SCALE = 12.5;
-
-function getCircleCount(usdValue) {
-  if (usdValue <= 0) return CIRCLE_MIN;
-  const count = Math.round(CIRCLE_SCALE * Math.log10(usdValue / CIRCLE_BASE));
-  return Math.min(CIRCLE_MAX, Math.max(CIRCLE_MIN, count));
-}
-
-function buildCircles(isBuy, usdValue) {
-  const emoji = isBuy ? "🟢" : "🔴";
-  const count = getCircleCount(usdValue);
-  let result = "";
-  for (let i = 0; i < count; i++) {
-    result += emoji;
-    if ((i + 1) % 10 === 0 && i + 1 < count) result += "\n";
+// ====================== FORMATTING ======================
+function formatTokenAmount(num) {
+  if (num == null || isNaN(num)) return "0";
+  // Remove trailing zeros while keeping meaningful decimals
+  let s = num.toLocaleString("en-US", { maximumFractionDigits: 8, useGrouping: true });
+  if (s.includes(".")) {
+    s = s.replace(/\.?0+$/, "");
   }
-  return result;
+  return s;
 }
 
+function formatWetnAmount(num) {
+  if (num == null || isNaN(num)) return "0";
+  // Max 3 decimal places, remove trailing zeros
+  let s = num.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 3, useGrouping: true });
+  if (s.includes(".")) {
+    s = s.replace(/\.?0+$/, "");
+  }
+  return s;
+}
+
+function formatTokenPrice(price) {
+  if (price == null || isNaN(price) || price <= 0) return "$0";
+  let decimals;
+  if (price >= 1) decimals = 4;
+  else if (price >= 0.01) decimals = 6;
+  else if (price >= 0.0001) decimals = 8;
+  else decimals = 10;
+  let s = price.toFixed(decimals);
+  s = s.replace(/\.?0+$/, "");
+  return "$" + s;
+}
+
+function formatMarketCap(mc) {
+  if (mc == null || isNaN(mc) || mc <= 0) return null;
+  if (mc >= 1_000_000) return "$" + (mc / 1_000_000).toFixed(2).replace(/\.?0+$/, "") + "M";
+  if (mc >= 1_000) return "$" + Math.round(mc).toLocaleString("en-US");
+  return "$" + mc.toFixed(2).replace(/\.?0+$/, "");
+}
+
+function formatPosition(pct) {
+  if (pct == null || isNaN(pct)) return null;
+  const sign = pct >= 0 ? "+" : "";
+  return sign + pct.toFixed(2) + "%";
+}
+
+// ====================== ENRICHMENT ======================
+async function getTotalSupply(tokenAddress, decimals) {
+  const key = tokenAddress.toLowerCase();
+  const cached = supplyCache.get(key);
+  if (cached && Date.now() - cached.ts < SUPPLY_TTL) return cached.value;
+
+  try {
+    const c = new ethers.Contract(tokenAddress, erc20Abi, provider);
+    const raw = await c.totalSupply();
+    const value = Number(ethers.formatUnits(raw, decimals));
+    supplyCache.set(key, { value, ts: Date.now() });
+    return value;
+  } catch (e) {
+    console.error(`totalSupply failed for ${tokenAddress.slice(0, 8)}:`, e.message);
+    return null;
+  }
+}
+
+async function getWalletBalance(tokenAddress, wallet, decimals) {
+  try {
+    const c = new ethers.Contract(tokenAddress, erc20Abi, provider);
+    const raw = await c.balanceOf(wallet);
+    return Number(ethers.formatUnits(raw, decimals));
+  } catch (e) {
+    console.error(`balanceOf failed for ${wallet.slice(0, 8)}:`, e.message);
+    return null;
+  }
+}
+
+async function getHolders(tokenAddress) {
+  const key = tokenAddress.toLowerCase();
+  const cached = holdersCache.get(key);
+  if (cached && Date.now() - cached.ts < HOLDERS_TTL) return cached.value;
+
+  try {
+    const url = `${BLOCKSCOUT_BASE}/tokens/${tokenAddress}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const holders = data.holders != null ? Number(data.holders) : null;
+    if (holders != null) {
+      holdersCache.set(key, { value: holders, ts: Date.now() });
+    }
+    return holders;
+  } catch (e) {
+    console.error(`Blockscout holders failed for ${tokenAddress.slice(0, 8)}:`, e.message);
+    return null; // graceful – alert still goes out
+  }
+}
+
+async function getEnrichment(tokenAddress, symbol, wallet, decimals, tokenUsdPrice) {
+  // All failures are non-fatal
+  const [totalSupply, walletBal, holders] = await Promise.all([
+    getTotalSupply(tokenAddress, decimals),
+    getWalletBalance(tokenAddress, wallet, decimals),
+    getHolders(tokenAddress)
+  ]);
+
+  let marketCap = null;
+  let positionPct = null;
+
+  if (totalSupply != null && totalSupply > 0 && tokenUsdPrice > 0) {
+    marketCap = totalSupply * tokenUsdPrice;
+    if (walletBal != null && walletBal >= 0) {
+      const walletValue = walletBal * tokenUsdPrice;
+      positionPct = (walletValue / marketCap) * 100;
+    }
+  }
+
+  return {
+    totalSupply,
+    walletBal,
+    holders,
+    marketCap,
+    positionPct,
+    tokenUsdPrice
+  };
+}
+
+// ====================== EXISTING HELPERS (unchanged) ======================
 async function loadDecimals() {
   for (const symbol of Object.keys(ADDR)) {
     try {
@@ -245,9 +356,10 @@ function walletLinkParts(wallet) {
   return { link, short };
 }
 
-function formatWetnMessage(symbol, isBuy, wetnAmount, tokenAmount, txHash, wallet, poolAddress, website, websiteLabel) {
+// ====================== MESSAGE FORMATTER (extended) ======================
+function formatWetnMessage(symbol, isBuy, wetnAmount, tokenAmount, txHash, wallet, poolAddress, website, websiteLabel, enrichment) {
   const usdValue = wetnAmount * etnPriceUsd;
-  const usdPricePerToken = tokenAmount > 0 ? usdValue / tokenAmount : 0;
+  const tokenUsdPrice = enrichment?.tokenUsdPrice ?? (tokenAmount > 0 ? usdValue / tokenAmount : 0);
   const circles = buildCircles(isBuy, usdValue);
   const label = isBuy ? "BUY" : "SELL";
   const roleLabel = isBuy ? "Buyer" : "Seller";
@@ -255,15 +367,39 @@ function formatWetnMessage(symbol, isBuy, wetnAmount, tokenAmount, txHash, walle
   const { link: walletLink, short: walletShort } = walletLinkParts(wallet);
   const buyLink = `https://app.electroswap.io/swap?inputCurrency=${WETN}&outputCurrency=${ADDR[symbol]}`;
   const liveTxsLink = "https://blockexplorer.electroneum.com/address/" + poolAddress;
-  let msg = circles + "\n*" + symbol + " " + label + "* ($" + fmt(usdValue, 2) + ")\n\n" +
-    "💰 *" + (isBuy ? "Paid" : "Received") + ":* " + fmt(wetnAmount, 4) + " WETN\n" +
-    "🔢 *Amount:* " + fmt(tokenAmount, 6) + " " + symbol + "\n" +
-    "💵 *" + symbol + " Price:* $" + fmt(usdPricePerToken, 6) + "\n" +
-    "👤 *" + roleLabel + ":* [" + walletShort + "](" + walletLink + ")\n" +
-    "🔗 [View Transaction](" + txLink + ")\n\n" +
-    "━━━━━━━━━━━━━━━━━━━━━━\n\n" +
-    "💵 [Buy " + symbol + "](" + buyLink + ") | ⚡ [Live Txs](" + liveTxsLink + ")";
+
+  let msg = circles + "\n*" + symbol + " " + label + "* ($" + usdValue.toFixed(2) + ")\n\n";
+
+  if (isBuy) {
+    msg += "💰 *Paid:* " + formatWetnAmount(wetnAmount) + " WETN\n";
+    msg += "🔢 *Got:* " + formatTokenAmount(tokenAmount) + " " + symbol + "\n";
+  } else {
+    msg += "💰 *Received:* " + formatWetnAmount(wetnAmount) + " WETN\n";
+    msg += "🔢 *Amount:* " + formatTokenAmount(tokenAmount) + " " + symbol + "\n";
+  }
+
+  msg += "💵 *" + symbol + " Price:* " + formatTokenPrice(tokenUsdPrice) + "\n";
+  msg += "👤 *" + roleLabel + ":* [" + walletShort + "](" + walletLink + ")\n";
+  msg += "🔗 [View Transaction](" + txLink + ")\n";
+
+  // Enrichment block (only lines that succeeded)
+  if (enrichment) {
+    if (enrichment.positionPct != null) {
+      msg += "\n📈 *Position:* " + formatPosition(enrichment.positionPct);
+    }
+    if (enrichment.marketCap != null) {
+      msg += "\n💎 *Market Cap:* " + formatMarketCap(enrichment.marketCap);
+    }
+    if (enrichment.holders != null) {
+      msg += "\n👥 *" + symbol + " Holders:* " + enrichment.holders.toLocaleString("en-US");
+    }
+  }
+
+  msg += "\n💵 *ETN Price:* " + formatTokenPrice(etnPriceUsd);
+  msg += "\n\n━━━━━━━━━━━━━━━━━━━━━━\n\n";
+  msg += "💵 [Buy " + symbol + "](" + buyLink + ") | ⚡ [Live Txs](" + liveTxsLink + ")";
   if (website) msg += "\n🌎 [" + websiteLabel + "](" + website + ")";
+
   return msg;
 }
 
@@ -273,12 +409,12 @@ function formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, txHash, wa
   const liveTxsLink = "https://blockexplorer.electroneum.com/address/" + poolAddress;
   const tradeLink = `https://app.electroswap.io/swap?inputCurrency=${ADDR[symbolIn]}&outputCurrency=${ADDR[symbolOut]}`;
   let usdLine = "";
-  if (STABLES.includes(symbolIn)) usdLine = "💵 *Value:* $" + fmt(amountIn, 2) + "\n";
-  else if (STABLES.includes(symbolOut)) usdLine = "💵 *Value:* $" + fmt(amountOut, 2) + "\n";
+  if (STABLES.includes(symbolIn)) usdLine = "💵 *Value:* $" + amountIn.toFixed(2) + "\n";
+  else if (STABLES.includes(symbolOut)) usdLine = "💵 *Value:* $" + amountOut.toFixed(2) + "\n";
   const circles = "🔵".repeat(10);
   return circles + "\n*" + symbolIn + " → " + symbolOut + " SWAP*\n\n" +
-    "💰 *Paid:* " + fmt(amountIn, 6) + " " + symbolIn + "\n" +
-    "🔢 *Received:* " + fmt(amountOut, 6) + " " + symbolOut + "\n" +
+    "💰 *Paid:* " + formatTokenAmount(amountIn) + " " + symbolIn + "\n" +
+    "🔢 *Received:* " + formatTokenAmount(amountOut) + " " + symbolOut + "\n" +
     usdLine +
     "👤 *Trader:* [" + walletShort + "](" + walletLink + ")\n" +
     "🔗 [View Transaction](" + txLink + ")\n\n" +
@@ -343,6 +479,29 @@ function makeKey(txHash, logIndex) {
   return txHash + "-" + logIndex;
 }
 
+const CIRCLE_MIN = 1;
+const CIRCLE_MAX = 50;
+const CIRCLE_BASE = 0.08;
+const CIRCLE_SCALE = 12.5;
+
+function getCircleCount(usdValue) {
+  if (usdValue <= 0) return CIRCLE_MIN;
+  const count = Math.round(CIRCLE_SCALE * Math.log10(usdValue / CIRCLE_BASE));
+  return Math.min(CIRCLE_MAX, Math.max(CIRCLE_MIN, count));
+}
+
+function buildCircles(isBuy, usdValue) {
+  const emoji = isBuy ? "🟢" : "🔴";
+  const count = getCircleCount(usdValue);
+  let result = "";
+  for (let i = 0; i < count; i++) {
+    result += emoji;
+    if ((i + 1) % 10 === 0 && i + 1 < count) result += "\n";
+  }
+  return result;
+}
+
+// ====================== POOL CHECKERS (seenKeys fix preserved) ======================
 async function checkWetnPoolV2(p, fromBlock, toBlock) {
   const pool = new ethers.Contract(p.pool, v2Abi, provider);
   const events = await pool.queryFilter("Swap", fromBlock, toBlock);
@@ -368,10 +527,7 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
     if (tokenAmountFromSwap < 0.000001 || wetnAmount < 0.000001) continue;
 
     const wallet = await getTraderWallet(event.transactionHash);
-    if (!wallet) {
-      console.log(`⚠️ No wallet for ${p.symbol} tx ${event.transactionHash.slice(0,10)}`);
-      continue;
-    }
+    if (!wallet) continue;
 
     const direction = isBuy ? "to" : "from";
     const genuine = await isGenuineLeg(event.transactionHash, wallet, p.token, direction);
@@ -384,14 +540,23 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
     const tokenAmount = getBetterTokenAmount(receipt, p.token, wallet, direction, dec, tokenAmountFromSwap);
     wetnAmount = getNetWetnAmount(receipt, isBuy, wetnAmount);
     const usdValue = wetnAmount * etnPriceUsd;
+    const tokenUsdPrice = tokenAmount > 0 ? usdValue / tokenAmount : 0;
 
-    // Only reserve the key when we are about to send a real notification
+    // ========== ENRICHMENT (only after genuine leg confirmed) ==========
+    let enrichment = null;
+    try {
+      enrichment = await getEnrichment(p.token, p.symbol, wallet, dec, tokenUsdPrice);
+    } catch (e) {
+      console.error("Enrichment failed (non-fatal):", e.message);
+    }
+
+    // Only reserve the key when we are about to send
     seenKeys.add(key);
 
-    const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel);
+    const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel, enrichment);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
     await sendMessageWithOptionalGif(message, gifUrl, usdValue);
-    console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} | Amount: ${tokenAmount.toFixed(4)} [v2]`);
+    console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} | Amount: ${formatTokenAmount(tokenAmount)} [v2]`);
   }
 }
 
@@ -416,10 +581,7 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
     if (tokenAmountFromSwap < 0.000001 || wetnAmount < 0.000001) continue;
 
     const wallet = await getTraderWallet(event.transactionHash);
-    if (!wallet) {
-      console.log(`⚠️ No wallet for ${p.symbol} tx ${event.transactionHash.slice(0,10)}`);
-      continue;
-    }
+    if (!wallet) continue;
 
     const direction = isBuy ? "to" : "from";
     const genuine = await isGenuineLeg(event.transactionHash, wallet, p.token, direction);
@@ -432,14 +594,23 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
     const tokenAmount = getBetterTokenAmount(receipt, p.token, wallet, direction, dec, tokenAmountFromSwap);
     wetnAmount = getNetWetnAmount(receipt, isBuy, wetnAmount);
     const usdValue = wetnAmount * etnPriceUsd;
+    const tokenUsdPrice = tokenAmount > 0 ? usdValue / tokenAmount : 0;
 
-    // Only reserve the key when we are about to send a real notification
+    // ========== ENRICHMENT (only after genuine leg confirmed) ==========
+    let enrichment = null;
+    try {
+      enrichment = await getEnrichment(p.token, p.symbol, wallet, dec, tokenUsdPrice);
+    } catch (e) {
+      console.error("Enrichment failed (non-fatal):", e.message);
+    }
+
+    // Only reserve the key when we are about to send
     seenKeys.add(key);
 
-    const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel);
+    const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel, enrichment);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
     await sendMessageWithOptionalGif(message, gifUrl, usdValue);
-    console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} | Amount: ${tokenAmount.toFixed(4)} [v3]`);
+    console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} | Amount: ${formatTokenAmount(tokenAmount)} [v3]`);
   }
 }
 
@@ -489,7 +660,6 @@ async function checkCrossPoolV2(p, fromBlock, toBlock) {
     if (STABLES.includes(symbolIn)) usdValue = amountIn;
     else if (STABLES.includes(symbolOut)) usdValue = amountOut;
 
-    // Only reserve the key when we are about to send a real notification
     seenKeys.add(key);
 
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
@@ -537,7 +707,6 @@ async function checkCrossPoolV3(p, fromBlock, toBlock) {
     if (STABLES.includes(symbolIn)) usdValue = amountIn;
     else if (STABLES.includes(symbolOut)) usdValue = amountOut;
 
-    // Only reserve the key when we are about to send a real notification
     seenKeys.add(key);
 
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
@@ -585,6 +754,7 @@ async function start() {
   console.log(`Main group: ${CHAT_ID}`);
   console.log(`CLUB group: ${CLUB_GROUP_CHAT_ID} → LIVE TRADES topic (${LIVE_TRADES_TOPIC_ID}) ≥ $10`);
   console.log(`Router: ${ROUTER_ADDRESS}`);
+  console.log("Enrichment: on-chain totalSupply + balanceOf + Blockscout holders");
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
