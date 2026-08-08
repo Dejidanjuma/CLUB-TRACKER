@@ -99,29 +99,23 @@ const tokenDecimals = {};
 const seenKeys = new Set();
 
 // ====================== CACHES ======================
-const supplyCache = new Map();   // tokenAddress -> { value, ts }
-const holdersCache = new Map();  // tokenAddress -> { value, ts }
-const SUPPLY_TTL = 3 * 60 * 1000;   // 3 minutes
-const HOLDERS_TTL = 8 * 60 * 1000;  // 8 minutes
+const supplyCache = new Map();
+const holdersCache = new Map();
+const SUPPLY_TTL = 3 * 60 * 1000;
+const HOLDERS_TTL = 8 * 60 * 1000;
 
 // ====================== FORMATTING ======================
 function formatTokenAmount(num) {
   if (num == null || isNaN(num)) return "0";
-  // Remove trailing zeros while keeping meaningful decimals
   let s = num.toLocaleString("en-US", { maximumFractionDigits: 8, useGrouping: true });
-  if (s.includes(".")) {
-    s = s.replace(/\.?0+$/, "");
-  }
+  if (s.includes(".")) s = s.replace(/\.?0+$/, "");
   return s;
 }
 
 function formatWetnAmount(num) {
   if (num == null || isNaN(num)) return "0";
-  // Max 3 decimal places, remove trailing zeros
   let s = num.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 3, useGrouping: true });
-  if (s.includes(".")) {
-    s = s.replace(/\.?0+$/, "");
-  }
+  if (s.includes(".")) s = s.replace(/\.?0+$/, "");
   return s;
 }
 
@@ -146,8 +140,9 @@ function formatMarketCap(mc) {
 
 function formatPosition(pct) {
   if (pct == null || isNaN(pct)) return null;
-  const sign = pct >= 0 ? "+" : "";
-  return sign + pct.toFixed(2) + "%";
+  const abs = Math.abs(pct).toFixed(2);
+  if (pct >= 0) return "📈 *Position:* +" + abs + "%";
+  return "📉 *Position:* -" + abs + "%";
 }
 
 // ====================== ENRICHMENT ======================
@@ -196,13 +191,19 @@ async function getHolders(tokenAddress) {
     return holders;
   } catch (e) {
     console.error(`Blockscout holders failed for ${tokenAddress.slice(0, 8)}:`, e.message);
-    return null; // graceful – alert still goes out
+    return null;
   }
 }
 
-async function getEnrichment(tokenAddress, symbol, wallet, decimals, tokenUsdPrice) {
-  // All failures are non-fatal
-  const [totalSupply, walletBal, holders] = await Promise.all([
+/**
+ * Position = % change this trade makes to the trader's existing position.
+ * BUY:  +(tokensBought / balanceBefore) * 100
+ * SELL: -(tokensSold  / balanceBefore) * 100
+ *
+ * balanceBefore is reconstructed from post-tx balanceOf + genuine trade amount.
+ */
+async function getEnrichment(tokenAddress, symbol, wallet, decimals, tokenUsdPrice, tokenAmount, isBuy) {
+  const [totalSupply, walletBalAfter, holders] = await Promise.all([
     getTotalSupply(tokenAddress, decimals),
     getWalletBalance(tokenAddress, wallet, decimals),
     getHolders(tokenAddress)
@@ -213,15 +214,28 @@ async function getEnrichment(tokenAddress, symbol, wallet, decimals, tokenUsdPri
 
   if (totalSupply != null && totalSupply > 0 && tokenUsdPrice > 0) {
     marketCap = totalSupply * tokenUsdPrice;
-    if (walletBal != null && walletBal >= 0) {
-      const walletValue = walletBal * tokenUsdPrice;
-      positionPct = (walletValue / marketCap) * 100;
+  }
+
+  if (walletBalAfter != null && tokenAmount > 0) {
+    let balanceBefore;
+    if (isBuy) {
+      balanceBefore = walletBalAfter - tokenAmount;
+    } else {
+      balanceBefore = walletBalAfter + tokenAmount;
+    }
+
+    if (balanceBefore > 0.000001) {
+      if (isBuy) {
+        positionPct = (tokenAmount / balanceBefore) * 100;
+      } else {
+        positionPct = -(tokenAmount / balanceBefore) * 100;
+      }
     }
   }
 
   return {
     totalSupply,
-    walletBal,
+    walletBal: walletBalAfter,
     holders,
     marketCap,
     positionPct,
@@ -229,7 +243,7 @@ async function getEnrichment(tokenAddress, symbol, wallet, decimals, tokenUsdPri
   };
 }
 
-// ====================== EXISTING HELPERS (unchanged) ======================
+// ====================== EXISTING HELPERS ======================
 async function loadDecimals() {
   for (const symbol of Object.keys(ADDR)) {
     try {
@@ -247,9 +261,14 @@ async function updatePrice() {
     const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=electroneum&vs_currencies=usd");
     if (res.ok) {
       const data = await res.json();
-      if (data.electroneum?.usd) etnPriceUsd = data.electroneum.usd;
+      if (data.electroneum?.usd) {
+        etnPriceUsd = data.electroneum.usd;
+        console.log("ETN price updated:", etnPriceUsd);
+      }
     }
-  } catch (e) {}
+  } catch (e) {
+    console.error("CoinGecko price update failed:", e.message);
+  }
 }
 
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -356,7 +375,7 @@ function walletLinkParts(wallet) {
   return { link, short };
 }
 
-// ====================== MESSAGE FORMATTER (extended) ======================
+// ====================== MESSAGE FORMATTER ======================
 function formatWetnMessage(symbol, isBuy, wetnAmount, tokenAmount, txHash, wallet, poolAddress, website, websiteLabel, enrichment) {
   const usdValue = wetnAmount * etnPriceUsd;
   const tokenUsdPrice = enrichment?.tokenUsdPrice ?? (tokenAmount > 0 ? usdValue / tokenAmount : 0);
@@ -382,11 +401,10 @@ function formatWetnMessage(symbol, isBuy, wetnAmount, tokenAmount, txHash, walle
   msg += "👤 *" + roleLabel + ":* [" + walletShort + "](" + walletLink + ")\n";
   msg += "🔗 [View Transaction](" + txLink + ")\n";
 
-  // Enrichment block (only lines that succeeded)
   if (enrichment) {
-    if (enrichment.positionPct != null) {
-      msg += "\n📈 *Position:* " + formatPosition(enrichment.positionPct);
-    }
+    const posLine = formatPosition(enrichment.positionPct);
+    if (posLine) msg += "\n" + posLine;
+
     if (enrichment.marketCap != null) {
       msg += "\n💎 *Market Cap:* " + formatMarketCap(enrichment.marketCap);
     }
@@ -501,7 +519,7 @@ function buildCircles(isBuy, usdValue) {
   return result;
 }
 
-// ====================== POOL CHECKERS (seenKeys fix preserved) ======================
+// ====================== POOL CHECKERS ======================
 async function checkWetnPoolV2(p, fromBlock, toBlock) {
   const pool = new ethers.Contract(p.pool, v2Abi, provider);
   const events = await pool.queryFilter("Swap", fromBlock, toBlock);
@@ -542,15 +560,13 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
     const usdValue = wetnAmount * etnPriceUsd;
     const tokenUsdPrice = tokenAmount > 0 ? usdValue / tokenAmount : 0;
 
-    // ========== ENRICHMENT (only after genuine leg confirmed) ==========
     let enrichment = null;
     try {
-      enrichment = await getEnrichment(p.token, p.symbol, wallet, dec, tokenUsdPrice);
+      enrichment = await getEnrichment(p.token, p.symbol, wallet, dec, tokenUsdPrice, tokenAmount, isBuy);
     } catch (e) {
       console.error("Enrichment failed (non-fatal):", e.message);
     }
 
-    // Only reserve the key when we are about to send
     seenKeys.add(key);
 
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel, enrichment);
@@ -596,15 +612,13 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
     const usdValue = wetnAmount * etnPriceUsd;
     const tokenUsdPrice = tokenAmount > 0 ? usdValue / tokenAmount : 0;
 
-    // ========== ENRICHMENT (only after genuine leg confirmed) ==========
     let enrichment = null;
     try {
-      enrichment = await getEnrichment(p.token, p.symbol, wallet, dec, tokenUsdPrice);
+      enrichment = await getEnrichment(p.token, p.symbol, wallet, dec, tokenUsdPrice, tokenAmount, isBuy);
     } catch (e) {
       console.error("Enrichment failed (non-fatal):", e.message);
     }
 
-    // Only reserve the key when we are about to send
     seenKeys.add(key);
 
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel, enrichment);
@@ -754,7 +768,7 @@ async function start() {
   console.log(`Main group: ${CHAT_ID}`);
   console.log(`CLUB group: ${CLUB_GROUP_CHAT_ID} → LIVE TRADES topic (${LIVE_TRADES_TOPIC_ID}) ≥ $10`);
   console.log(`Router: ${ROUTER_ADDRESS}`);
-  console.log("Enrichment: on-chain totalSupply + balanceOf + Blockscout holders");
+  console.log("Enrichment: Position = % change to existing position | Market Cap | Holders");
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
