@@ -10,6 +10,10 @@ const CHAT_ID = process.env.CHAT_ID;
 const CLUB_GROUP_CHAT_ID = process.env.CLUB_GROUP_CHAT_ID || "-1002386155004";
 const LIVE_TRADES_TOPIC_ID = 55341;
 const BLOCKSCOUT_BASE = "https://blockexplorer.electroneum.com/api/v2";
+const LIVE_TRADES_EXCLUDED_SYMBOLS = new Set(["CORE"]);
+
+// Liquid WETN/USDT V3 pool used for on-chain ETN price derivation
+const WETN_USDT_POOL = "0x0CC625331C9b22D94fEF29d462aB1c9B26dFF196";
 
 const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.mp4";
 const CLUB_SELL_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_sell.mp4";
@@ -86,14 +90,19 @@ const crossPools = [
 ];
 
 const v2Abi = ["event Swap(address indexed sender, uint amount0In, uint amount1In, uint amount0Out, uint amount1Out, address indexed to)"];
-const v3Abi = ["event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)"];
+const v3Abi = [
+  "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)",
+  "function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)",
+  "function token0() view returns (address)",
+  "function token1() view returns (address)"
+];
 const erc20Abi = [
   "function decimals() view returns (uint8)",
   "function totalSupply() view returns (uint256)",
   "function balanceOf(address) view returns (uint256)"
 ];
 
-let etnPriceUsd = 0.0008;
+let etnPriceUsd = 0.00025; // initial / last-known fallback only
 let lastBlock = null;
 const tokenDecimals = {};
 const seenKeys = new Set();
@@ -163,13 +172,18 @@ async function getTotalSupply(tokenAddress, decimals) {
   }
 }
 
-async function getWalletBalance(tokenAddress, wallet, decimals) {
+/**
+ * Historical balance immediately BEFORE the trade.
+ * Uses blockTag = blockNumber - 1 so later transactions cannot affect the result.
+ */
+async function getWalletBalanceAtBlock(tokenAddress, wallet, decimals, blockNumber) {
   try {
     const c = new ethers.Contract(tokenAddress, erc20Abi, provider);
-    const raw = await c.balanceOf(wallet);
+    const blockTag = Math.max(0, Number(blockNumber) - 1);
+    const raw = await c.balanceOf(wallet, { blockTag });
     return Number(ethers.formatUnits(raw, decimals));
   } catch (e) {
-    console.error(`balanceOf failed for ${wallet.slice(0, 8)}:`, e.message);
+    console.error(`balanceOf@block failed for ${wallet.slice(0, 8)}:`, e.message);
     return null;
   }
 }
@@ -197,15 +211,18 @@ async function getHolders(tokenAddress) {
 
 /**
  * Position = % change this trade makes to the trader's existing position.
+ * Uses the wallet balance at the block *before* the transaction.
+ *
  * BUY:  +(tokensBought / balanceBefore) * 100
  * SELL: -(tokensSold  / balanceBefore) * 100
  *
- * balanceBefore is reconstructed from post-tx balanceOf + genuine trade amount.
+ * - Omits Position when balanceBefore ≈ 0 (first-time buyer)
+ * - Clamps SELL Position to never exceed -100%
  */
-async function getEnrichment(tokenAddress, symbol, wallet, decimals, tokenUsdPrice, tokenAmount, isBuy) {
-  const [totalSupply, walletBalAfter, holders] = await Promise.all([
+async function getEnrichment(tokenAddress, symbol, wallet, decimals, tokenUsdPrice, tokenAmount, isBuy, blockNumber) {
+  const [totalSupply, balanceBefore, holders] = await Promise.all([
     getTotalSupply(tokenAddress, decimals),
-    getWalletBalance(tokenAddress, wallet, decimals),
+    getWalletBalanceAtBlock(tokenAddress, wallet, decimals, blockNumber),
     getHolders(tokenAddress)
   ]);
 
@@ -216,26 +233,21 @@ async function getEnrichment(tokenAddress, symbol, wallet, decimals, tokenUsdPri
     marketCap = totalSupply * tokenUsdPrice;
   }
 
-  if (walletBalAfter != null && tokenAmount > 0) {
-    let balanceBefore;
-    if (isBuy) {
-      balanceBefore = walletBalAfter - tokenAmount;
-    } else {
-      balanceBefore = walletBalAfter + tokenAmount;
-    }
-
+  if (balanceBefore != null && tokenAmount > 0) {
     if (balanceBefore > 0.000001) {
       if (isBuy) {
         positionPct = (tokenAmount / balanceBefore) * 100;
       } else {
-        positionPct = -(tokenAmount / balanceBefore) * 100;
+        const sold = Math.min(tokenAmount, balanceBefore);
+        positionPct = -(sold / balanceBefore) * 100;
+        if (positionPct < -100) positionPct = -100;
       }
     }
   }
 
   return {
     totalSupply,
-    walletBal: walletBalAfter,
+    walletBal: balanceBefore,
     holders,
     marketCap,
     positionPct,
@@ -243,7 +255,7 @@ async function getEnrichment(tokenAddress, symbol, wallet, decimals, tokenUsdPri
   };
 }
 
-// ====================== EXISTING HELPERS ======================
+// ====================== HELPERS ======================
 async function loadDecimals() {
   for (const symbol of Object.keys(ADDR)) {
     try {
@@ -256,19 +268,120 @@ async function loadDecimals() {
   console.log("Decimals loaded:", tokenDecimals);
 }
 
+/**
+ * On-chain ETN price from the WETN/USDT V3 pool.
+ * Correctly handles either token ordering and decimals (WETN=18, USDT=6).
+ * Keeps values as BigInt until magnitude is reduced, then converts to Number.
+ * Returns null on any failure or unreasonable value.
+ */
+async function getEtNPriceFromPool() {
+  try {
+    const pool = new ethers.Contract(WETN_USDT_POOL, v3Abi, provider);
+    const [slot0, token0Addr, token1Addr] = await Promise.all([
+      pool.slot0(),
+      pool.token0(),
+      pool.token1()
+    ]);
+
+    const t0 = token0Addr.toLowerCase();
+    const t1 = token1Addr.toLowerCase();
+    const wetn = WETN.toLowerCase();
+    const usdt = ADDR.USDT.toLowerCase();
+
+    const isWetnUsdt =
+      (t0 === wetn && t1 === usdt) ||
+      (t0 === usdt && t1 === wetn);
+
+    if (!isWetnUsdt) {
+      console.error("Pool is not WETN/USDT – skipping on-chain price");
+      return null;
+    }
+
+    const sqrtPriceX96 = slot0[0]; // BigInt
+    if (typeof sqrtPriceX96 !== "bigint" || sqrtPriceX96 <= 0n) return null;
+
+    const Q96 = 2n ** 96n;
+
+    // Reduce magnitude while still in BigInt (1e18 scale avoids truncation to 0)
+    const ratioScaled = (sqrtPriceX96 * 10n ** 18n) / Q96;
+    const sqrtP = Number(ratioScaled) / 1e18;
+    const rawPrice = sqrtP * sqrtP; // token1_raw / token0_raw
+
+    if (!isFinite(rawPrice) || rawPrice <= 0) return null;
+
+    let priceUsdtPerWetn;
+
+    if (t0 === wetn && t1 === usdt) {
+      // token0 = WETN (18), token1 = USDT (6)
+      priceUsdtPerWetn = rawPrice * 1e12;
+    } else {
+      // token0 = USDT (6), token1 = WETN (18)
+      priceUsdtPerWetn = (1 / rawPrice) * 1e12;
+    }
+
+    if (!isFinite(priceUsdtPerWetn) || priceUsdtPerWetn <= 0 || priceUsdtPerWetn > 1) {
+      console.error("On-chain price out of reasonable range:", priceUsdtPerWetn);
+      return null;
+    }
+
+    return priceUsdtPerWetn;
+  } catch (e) {
+    console.error("On-chain ETN price failed:", e.message);
+    return null;
+  }
+}
+
+/**
+ * ETN price priority:
+ * 1. On-chain WETN/USDT V3 pool
+ * 2. CoinPaprika
+ * 3. CoinGecko
+ * 4. Keep previous valid value
+ */
 async function updatePrice() {
   try {
-    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=electroneum&vs_currencies=usd");
+    const onChain = await getEtNPriceFromPool();
+    if (onChain && onChain > 0) {
+      etnPriceUsd = onChain;
+      console.log("ETN price (on-chain WETN/USDT):", etnPriceUsd);
+      return;
+    }
+  } catch (e) {}
+
+  try {
+    const res = await fetch("https://api.coinpaprika.com/v1/tickers/etn-electroneum", {
+      signal: AbortSignal.timeout(5000)
+    });
     if (res.ok) {
       const data = await res.json();
-      if (data.electroneum?.usd) {
-        etnPriceUsd = data.electroneum.usd;
-        console.log("ETN price updated:", etnPriceUsd);
+      const p = data?.quotes?.USD?.price;
+      if (p && p > 0 && isFinite(p)) {
+        etnPriceUsd = p;
+        console.log("ETN price (CoinPaprika):", etnPriceUsd);
+        return;
       }
     }
   } catch (e) {
-    console.error("CoinGecko price update failed:", e.message);
+    console.error("CoinPaprika failed:", e.message);
   }
+
+  try {
+    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=electroneum&vs_currencies=usd", {
+      signal: AbortSignal.timeout(5000)
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.electroneum?.usd && data.electroneum.usd > 0) {
+        etnPriceUsd = data.electroneum.usd;
+        console.log("ETN price (CoinGecko fallback):", etnPriceUsd);
+        return;
+      }
+    }
+  } catch (e) {
+    console.error("CoinGecko failed:", e.message);
+  }
+
+  console.log("All ETN price sources failed – keeping previous value:", etnPriceUsd);
 }
 
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -440,24 +553,38 @@ function formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, txHash, wa
     "🔄 [Trade " + symbolIn + "→" + symbolOut + "](" + tradeLink + ") | ⚡ [Live Txs](" + liveTxsLink + ")";
 }
 
-async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0) {
+async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0, symbol = null) {
   const opts = { parse_mode: "Markdown", disable_web_page_preview: true };
+
+  // ── 1. ALWAYS send to MAIN group (no minimum) ──
   try {
     if (gifUrl) {
-      await bot.sendAnimation(CHAT_ID, gifUrl, { caption: message, parse_mode: "Markdown" });
+      await bot.sendAnimation(CHAT_ID, gifUrl, {
+        caption: message,
+        parse_mode: "Markdown"
+      });
     } else {
       await bot.sendMessage(CHAT_ID, message, opts);
     }
   } catch (err) {
     console.error("Send failed to main group:", err.message);
-    try { await bot.sendMessage(CHAT_ID, message, opts); } catch (e) {}
+    try {
+      await bot.sendMessage(CHAT_ID, message, opts);
+    } catch (e) {}
   }
-  if (usdValue >= 10) {
+
+  // ── 2. LIVE TRADES topic (only if ≥ $5 AND not excluded) ──
+  if (
+    usdValue >= 5 &&
+    symbol &&
+    !LIVE_TRADES_EXCLUDED_SYMBOLS.has(symbol)
+  ) {
     const topicOpts = {
       parse_mode: "Markdown",
       disable_web_page_preview: true,
       message_thread_id: LIVE_TRADES_TOPIC_ID
     };
+
     try {
       if (gifUrl) {
         await bot.sendAnimation(CLUB_GROUP_CHAT_ID, gifUrl, {
@@ -466,11 +593,25 @@ async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0) {
           message_thread_id: LIVE_TRADES_TOPIC_ID
         });
       } else {
-        await bot.sendMessage(CLUB_GROUP_CHAT_ID, message, topicOpts);
+        await bot.sendMessage(
+          CLUB_GROUP_CHAT_ID,
+          message,
+          topicOpts
+        );
       }
     } catch (err) {
-      console.error("Send failed to LIVE TRADES topic:", err.message);
-      try { await bot.sendMessage(CLUB_GROUP_CHAT_ID, message, topicOpts); } catch (e) {}
+      console.error(
+        "Send failed to LIVE TRADES topic:",
+        err.message
+      );
+
+      try {
+        await bot.sendMessage(
+          CLUB_GROUP_CHAT_ID,
+          message,
+          topicOpts
+        );
+      } catch (e) {}
     }
   }
 }
@@ -562,7 +703,10 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
 
     let enrichment = null;
     try {
-      enrichment = await getEnrichment(p.token, p.symbol, wallet, dec, tokenUsdPrice, tokenAmount, isBuy);
+      enrichment = await getEnrichment(
+        p.token, p.symbol, wallet, dec, tokenUsdPrice,
+        tokenAmount, isBuy, receipt.blockNumber
+      );
     } catch (e) {
       console.error("Enrichment failed (non-fatal):", e.message);
     }
@@ -571,7 +715,7 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
 
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel, enrichment);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
-    await sendMessageWithOptionalGif(message, gifUrl, usdValue);
+    await sendMessageWithOptionalGif(message, gifUrl, usdValue, p.symbol);
     console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} | Amount: ${formatTokenAmount(tokenAmount)} [v2]`);
   }
 }
@@ -614,7 +758,10 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
 
     let enrichment = null;
     try {
-      enrichment = await getEnrichment(p.token, p.symbol, wallet, dec, tokenUsdPrice, tokenAmount, isBuy);
+      enrichment = await getEnrichment(
+        p.token, p.symbol, wallet, dec, tokenUsdPrice,
+        tokenAmount, isBuy, receipt.blockNumber
+      );
     } catch (e) {
       console.error("Enrichment failed (non-fatal):", e.message);
     }
@@ -623,7 +770,7 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
 
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel, enrichment);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
-    await sendMessageWithOptionalGif(message, gifUrl, usdValue);
+    await sendMessageWithOptionalGif(message, gifUrl, usdValue, p.symbol);
     console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} | Amount: ${formatTokenAmount(tokenAmount)} [v3]`);
   }
 }
@@ -766,9 +913,10 @@ async function start() {
   console.log("Bot starting...");
   console.log(`Watching ${wetnPools.length} WETN pools + ${crossPools.length} cross pools`);
   console.log(`Main group: ${CHAT_ID}`);
-  console.log(`CLUB group: ${CLUB_GROUP_CHAT_ID} → LIVE TRADES topic (${LIVE_TRADES_TOPIC_ID}) ≥ $10`);
+  console.log(`CLUB group: ${CLUB_GROUP_CHAT_ID} → LIVE TRADES topic (${LIVE_TRADES_TOPIC_ID}) ≥ $5 (CORE excluded)`);
   console.log(`Router: ${ROUTER_ADDRESS}`);
-  console.log("Enrichment: Position = % change to existing position | Market Cap | Holders");
+  console.log("Enrichment: historical Position (block-1) + Market Cap + Holders");
+  console.log("ETN price: on-chain WETN/USDT (token-order aware + BigInt-safe) → CoinPaprika → CoinGecko");
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
