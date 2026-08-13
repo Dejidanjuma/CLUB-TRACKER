@@ -270,9 +270,8 @@ async function loadDecimals() {
 
 /**
  * On-chain ETN price from the WETN/USDT V3 pool.
- * Correctly handles either token ordering and decimals (WETN=18, USDT=6).
- * Keeps values as BigInt until magnitude is reduced, then converts to Number.
- * Returns null on any failure or unreasonable value.
+ * Mathematical calculation is correct (verified live).
+ * BigInt precision fix preserved.
  */
 async function getEtNPriceFromPool() {
   try {
@@ -302,7 +301,7 @@ async function getEtNPriceFromPool() {
 
     const Q96 = 2n ** 96n;
 
-    // Reduce magnitude while still in BigInt (1e18 scale avoids truncation to 0)
+    // Safe BigInt reduction (1e18 scale) – preserves the previous precision fix
     const ratioScaled = (sqrtPriceX96 * 10n ** 18n) / Q96;
     const sqrtP = Number(ratioScaled) / 1e18;
     const rawPrice = sqrtP * sqrtP; // token1_raw / token0_raw
@@ -320,7 +319,6 @@ async function getEtNPriceFromPool() {
     }
 
     if (!isFinite(priceUsdtPerWetn) || priceUsdtPerWetn <= 0 || priceUsdtPerWetn > 1) {
-      console.error("On-chain price out of reasonable range:", priceUsdtPerWetn);
       return null;
     }
 
@@ -332,22 +330,11 @@ async function getEtNPriceFromPool() {
 }
 
 /**
- * ETN price priority:
- * 1. On-chain WETN/USDT V3 pool
- * 2. CoinPaprika
- * 3. CoinGecko
- * 4. Keep previous valid value
+ * Fetch a reliable external ETN price.
+ * Returns { price, source } or null.
  */
-async function updatePrice() {
-  try {
-    const onChain = await getEtNPriceFromPool();
-    if (onChain && onChain > 0) {
-      etnPriceUsd = onChain;
-      console.log("ETN price (on-chain WETN/USDT):", etnPriceUsd);
-      return;
-    }
-  } catch (e) {}
-
+async function getExternalEtnPrice() {
+  // 1. CoinPaprika
   try {
     const res = await fetch("https://api.coinpaprika.com/v1/tickers/etn-electroneum", {
       signal: AbortSignal.timeout(5000)
@@ -356,15 +343,14 @@ async function updatePrice() {
       const data = await res.json();
       const p = data?.quotes?.USD?.price;
       if (p && p > 0 && isFinite(p)) {
-        etnPriceUsd = p;
-        console.log("ETN price (CoinPaprika):", etnPriceUsd);
-        return;
+        return { price: p, source: "CoinPaprika" };
       }
     }
   } catch (e) {
     console.error("CoinPaprika failed:", e.message);
   }
 
+  // 2. CoinGecko
   try {
     const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=electroneum&vs_currencies=usd", {
       signal: AbortSignal.timeout(5000)
@@ -372,13 +358,77 @@ async function updatePrice() {
     if (res.ok) {
       const data = await res.json();
       if (data.electroneum?.usd && data.electroneum.usd > 0) {
-        etnPriceUsd = data.electroneum.usd;
-        console.log("ETN price (CoinGecko fallback):", etnPriceUsd);
-        return;
+        return { price: data.electroneum.usd, source: "CoinGecko" };
       }
     }
   } catch (e) {
     console.error("CoinGecko failed:", e.message);
+  }
+
+  return null;
+}
+
+/**
+ * Robust ETN price update.
+ *
+ * Priority:
+ * 1. On-chain WETN/USDT (only if it is within a sensible deviation of a reliable external price)
+ * 2. CoinPaprika
+ * 3. CoinGecko
+ * 4. Previous valid price
+ *
+ * Dynamic validation protects against stale / low-liquidity pool prices.
+ */
+async function updatePrice() {
+  const MAX_DEVIATION = 0.04; // 4% relative tolerance
+
+  // Get external reference first
+  const external = await getExternalEtnPrice();
+  const externalPrice = external ? external.price : null;
+  const externalSource = external ? external.source : null;
+
+  // Get on-chain candidate
+  let onChainPrice = null;
+  try {
+    onChainPrice = await getEtNPriceFromPool();
+  } catch (e) {}
+
+  if (onChainPrice && onChainPrice > 0) {
+    console.log(`ETN price candidate (on-chain): $${onChainPrice}`);
+  }
+
+  if (externalPrice) {
+    console.log(`ETN price (${externalSource}): $${externalPrice}`);
+  }
+
+  // Decision logic
+  if (onChainPrice && onChainPrice > 0 && externalPrice && externalPrice > 0) {
+    const deviation = Math.abs(onChainPrice - externalPrice) / externalPrice;
+    console.log(`On-chain deviation: ${(deviation * 100).toFixed(2)}%`);
+
+    if (deviation <= MAX_DEVIATION) {
+      etnPriceUsd = onChainPrice;
+      console.log("On-chain price accepted");
+      return;
+    } else {
+      console.log("⚠️ On-chain price rejected — using external price");
+      etnPriceUsd = externalPrice;
+      return;
+    }
+  }
+
+  // Fallbacks when one side is missing
+  if (externalPrice && externalPrice > 0) {
+    etnPriceUsd = externalPrice;
+    console.log(`Using external price (${externalSource})`);
+    return;
+  }
+
+  if (onChainPrice && onChainPrice > 0) {
+    // No external available – accept on-chain as last resort
+    etnPriceUsd = onChainPrice;
+    console.log("Using on-chain price (no external available)");
+    return;
   }
 
   console.log("All ETN price sources failed – keeping previous value:", etnPriceUsd);
@@ -916,7 +966,7 @@ async function start() {
   console.log(`CLUB group: ${CLUB_GROUP_CHAT_ID} → LIVE TRADES topic (${LIVE_TRADES_TOPIC_ID}) ≥ $5 (CORE excluded)`);
   console.log(`Router: ${ROUTER_ADDRESS}`);
   console.log("Enrichment: historical Position (block-1) + Market Cap + Holders");
-  console.log("ETN price: on-chain WETN/USDT (token-order aware + BigInt-safe) → CoinPaprika → CoinGecko");
+  console.log("ETN price: on-chain WETN/USDT (validated vs external) → CoinPaprika → CoinGecko");
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
