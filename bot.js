@@ -101,7 +101,7 @@ const erc20Abi = [
   "function balanceOf(address) view returns (uint256)"
 ];
 
-let etnPriceUsd = 0.00025;
+let etnPriceUsd = 0.00071;
 let lastBlock = null;
 const tokenDecimals = {};
 const seenKeys = new Set();
@@ -266,10 +266,7 @@ async function getEtNPriceFromPool() {
       (t0 === wetn && t1 === usdt) ||
       (t0 === usdt && t1 === wetn);
 
-    if (!isWetnUsdt) {
-      console.error("Pool is not WETN/USDT – skipping on-chain price");
-      return null;
-    }
+    if (!isWetnUsdt) return null;
 
     const sqrtPriceX96 = slot0[0];
     if (typeof sqrtPriceX96 !== "bigint" || sqrtPriceX96 <= 0n) return null;
@@ -299,14 +296,10 @@ async function getEtNPriceFromPool() {
   }
 }
 
-/**
- * ONLY external source: CoinGecko
- * Returns null on any failure so the existing fallback logic can keep the previous price.
- */
 async function getExternalEtnPrice() {
   try {
     const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=electroneum&vs_currencies=usd", {
-      signal: AbortSignal.timeout(5000)
+      signal: AbortSignal.timeout(8000)
     });
     if (res.ok) {
       const data = await res.json();
@@ -321,10 +314,6 @@ async function getExternalEtnPrice() {
   return null;
 }
 
-/**
- * Prefer CoinGecko.
- * If CoinGecko fails → keep previous etnPriceUsd (or try on-chain as last resort).
- */
 async function updatePrice() {
   const external = await getExternalEtnPrice();
 
