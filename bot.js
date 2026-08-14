@@ -101,7 +101,7 @@ const erc20Abi = [
   "function balanceOf(address) view returns (uint256)"
 ];
 
-let etnPriceUsd = 0.00071; // start with a reasonable market value
+let etnPriceUsd = 0.00071;
 let lastBlock = null;
 const tokenDecimals = {};
 const seenKeys = new Set();
@@ -296,11 +296,17 @@ async function getEtNPriceFromPool() {
   }
 }
 
+/**
+ * Tries CoinGecko first, then CoinPaprika.
+ * Returns { price, source } or null.
+ */
 async function getExternalEtnPrice() {
+  // 1. CoinGecko
   try {
-    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=electroneum&vs_currencies=usd", {
-      signal: AbortSignal.timeout(10000)
-    });
+    const res = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=electroneum&vs_currencies=usd",
+      { signal: AbortSignal.timeout(10000) }
+    );
     if (res.ok) {
       const data = await res.json();
       const p = data?.electroneum?.usd;
@@ -313,41 +319,49 @@ async function getExternalEtnPrice() {
   } catch (e) {
     console.error("CoinGecko failed:", e.message);
   }
+
+  // 2. CoinPaprika
+  try {
+    const res = await fetch(
+      "https://api.coinpaprika.com/v1/tickers/etn-electroneum",
+      { signal: AbortSignal.timeout(10000) }
+    );
+    if (res.ok) {
+      const data = await res.json();
+      const p = data?.quotes?.USD?.price;
+      if (p && p > 0 && isFinite(p)) {
+        return { price: p, source: "CoinPaprika" };
+      }
+    } else {
+      console.error("CoinPaprika HTTP status:", res.status);
+    }
+  } catch (e) {
+    console.error("CoinPaprika failed:", e.message);
+  }
+
   return null;
 }
 
 /**
- * Robust price update:
- * 1. Prefer CoinGecko
- * 2. If CoinGecko fails, only accept on-chain if it is close to the last good price
- * 3. Otherwise keep the previous good price
+ * Price source order:
+ * 1. CoinGecko
+ * 2. CoinPaprika
+ * 3. Previous valid etnPriceUsd
+ *
+ * NEVER uses the WETN/USDT on-chain pool.
  */
 async function updatePrice() {
   const external = await getExternalEtnPrice();
 
   if (external && external.price > 0) {
     etnPriceUsd = external.price;
-    console.log(`ETN price (CoinGecko): $${etnPriceUsd}`);
+    console.log(`ETN price: $${etnPriceUsd} | Source: ${external.source}`);
     return;
   }
 
-  // CoinGecko failed – check on-chain carefully
-  try {
-    const onChain = await getEtNPriceFromPool();
-    if (onChain && onChain > 0) {
-      const deviation = Math.abs(onChain - etnPriceUsd) / etnPriceUsd;
-
-      if (deviation <= 0.03) { // within 3% of last known good price
-        etnPriceUsd = onChain;
-        console.log(`ETN price (on-chain accepted, deviation ${(deviation*100).toFixed(2)}%): $${etnPriceUsd}`);
-      } else {
-        console.log(`⚠️ On-chain price rejected (deviation ${(deviation*100).toFixed(2)}% from last good price). Keeping $${etnPriceUsd}`);
-      }
-      return;
-    }
-  } catch (e) {}
-
-  console.log("All ETN price sources failed – keeping previous value:", etnPriceUsd);
+  // Both external sources failed – keep the last known good price
+  console.log(`⚠️ CoinGecko and CoinPaprika unavailable`);
+  console.log(`ETN price: $${etnPriceUsd} | Source: Previous valid price`);
 }
 
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -866,7 +880,7 @@ async function start() {
   console.log(`CLUB group: ${CLUB_GROUP_CHAT_ID} → LIVE TRADES topic (${LIVE_TRADES_TOPIC_ID}) ≥ $5 (CORE excluded)`);
   console.log(`Router: ${ROUTER_ADDRESS}`);
   console.log("Enrichment: historical Position (block-1) + Market Cap + Holders");
-  console.log("ETN price: CoinGecko preferred → on-chain only if close to last good price");
+  console.log("ETN price: CoinGecko → CoinPaprika → previous valid price (never on-chain pool)");
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
