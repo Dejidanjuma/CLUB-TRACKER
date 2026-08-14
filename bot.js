@@ -105,11 +105,18 @@ let etnPriceUsd = 0.00071;
 let lastBlock = null;
 const tokenDecimals = {};
 const seenKeys = new Set();
+const reclassifiedTxs = new Set(); // transaction-level dedup for multi-hop reclassifications
 
 const supplyCache = new Map();
 const holdersCache = new Map();
 const SUPPLY_TTL = 3 * 60 * 1000;
 const HOLDERS_TTL = 8 * 60 * 1000;
+
+// Reverse lookup: address → symbol
+const ADDR_TO_SYMBOL = {};
+for (const [sym, addr] of Object.entries(ADDR)) {
+  ADDR_TO_SYMBOL[addr.toLowerCase()] = sym;
+}
 
 function formatTokenAmount(num) {
   if (num == null || isNaN(num)) return "0";
@@ -462,6 +469,49 @@ async function isGenuineLeg(txHash, wallet, tokenAddress, direction) {
   return transferInvolvesWallet(receipt, tokenAddress, wallet, direction);
 }
 
+/**
+ * Analyse the full receipt to find the trader's net non-WETN token flows.
+ * Returns an array of { symbol, address, amount, direction: "in"|"out" }
+ * where amount is always positive.
+ */
+function getTraderTokenFlows(receipt, wallet) {
+  if (!receipt) return [];
+  const walletTopic = walletTopicOf(wallet);
+  const flows = new Map(); // address → net BigInt (positive = received)
+
+  for (const log of receipt.logs) {
+    if (log.topics[0] !== TRANSFER_TOPIC) continue;
+    const tokenAddr = log.address.toLowerCase();
+    if (tokenAddr === WETN.toLowerCase()) continue; // ignore WETN itself
+
+    const isFrom = log.topics[1] && log.topics[1].toLowerCase() === walletTopic;
+    const isTo   = log.topics[2] && log.topics[2].toLowerCase() === walletTopic;
+    if (!isFrom && !isTo) continue;
+
+    const value = BigInt(log.data);
+    const current = flows.get(tokenAddr) || 0n;
+    if (isTo)   flows.set(tokenAddr, current + value);
+    if (isFrom) flows.set(tokenAddr, current - value);
+  }
+
+  const result = [];
+  for (const [addr, net] of flows) {
+    if (net === 0n) continue;
+    const symbol = ADDR_TO_SYMBOL[addr];
+    if (!symbol) continue; // only care about tracked tokens
+    const dec = tokenDecimals[symbol] || 18;
+    const amount = Number(ethers.formatUnits(net < 0n ? -net : net, dec));
+    if (amount < 0.000001) continue;
+    result.push({
+      symbol,
+      address: addr,
+      amount,
+      direction: net > 0n ? "in" : "out"
+    });
+  }
+  return result;
+}
+
 function walletLinkParts(wallet) {
   const link = "https://blockexplorer.electroneum.com/address/" + wallet;
   const short = wallet.slice(0, 6) + "..." + wallet.slice(-4);
@@ -660,6 +710,38 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
     }
 
     const receipt = await getReceipt(event.transactionHash);
+
+    // ===== Multi-hop reclassification =====
+    const flows = getTraderTokenFlows(receipt, wallet);
+    const outs = flows.filter(f => f.direction === "out");
+    const ins  = flows.filter(f => f.direction === "in");
+
+    // Require exactly one tracked OUT and one tracked IN
+    if (outs.length === 1 && ins.length === 1) {
+      // Already reclassified this whole transaction?
+      if (reclassifiedTxs.has(event.transactionHash)) {
+        seenKeys.add(key);
+        continue;
+      }
+
+      const outFlow = outs[0];
+      const inFlow  = ins[0];
+      const symbolIn  = outFlow.symbol;
+      const amountIn  = outFlow.amount;
+      const symbolOut = inFlow.symbol;
+      const amountOut = inFlow.amount;
+
+      reclassifiedTxs.add(event.transactionHash);
+      seenKeys.add(key);
+
+      const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
+      const gifUrl = pickCrossGif(symbolIn, symbolOut);
+      await sendMessageWithOptionalGif(message, gifUrl, 0);
+      console.log(`✅ Sent multi-hop ${symbolIn}→${symbolOut} (reclassified from ${p.symbol} WETN leg) [v2]`);
+      continue;
+    }
+    // ===== END multi-hop =====
+
     const tokenAmount = getBetterTokenAmount(receipt, p.token, wallet, direction, dec, tokenAmountFromSwap);
     wetnAmount = getNetWetnAmount(receipt, isBuy, wetnAmount);
     const usdValue = wetnAmount * etnPriceUsd;
@@ -715,6 +797,38 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
     }
 
     const receipt = await getReceipt(event.transactionHash);
+
+    // ===== Multi-hop reclassification =====
+    const flows = getTraderTokenFlows(receipt, wallet);
+    const outs = flows.filter(f => f.direction === "out");
+    const ins  = flows.filter(f => f.direction === "in");
+
+    // Require exactly one tracked OUT and one tracked IN
+    if (outs.length === 1 && ins.length === 1) {
+      // Already reclassified this whole transaction?
+      if (reclassifiedTxs.has(event.transactionHash)) {
+        seenKeys.add(key);
+        continue;
+      }
+
+      const outFlow = outs[0];
+      const inFlow  = ins[0];
+      const symbolIn  = outFlow.symbol;
+      const amountIn  = outFlow.amount;
+      const symbolOut = inFlow.symbol;
+      const amountOut = inFlow.amount;
+
+      reclassifiedTxs.add(event.transactionHash);
+      seenKeys.add(key);
+
+      const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
+      const gifUrl = pickCrossGif(symbolIn, symbolOut);
+      await sendMessageWithOptionalGif(message, gifUrl, 0);
+      console.log(`✅ Sent multi-hop ${symbolIn}→${symbolOut} (reclassified from ${p.symbol} WETN leg) [v3]`);
+      continue;
+    }
+    // ===== END multi-hop =====
+
     const tokenAmount = getBetterTokenAmount(receipt, p.token, wallet, direction, dec, tokenAmountFromSwap);
     wetnAmount = getNetWetnAmount(receipt, isBuy, wetnAmount);
     const usdValue = wetnAmount * etnPriceUsd;
@@ -748,6 +862,12 @@ async function checkCrossPoolV2(p, fromBlock, toBlock) {
   for (const event of events) {
     const key = makeKey(event.transactionHash, event.logIndex);
     if (seenKeys.has(key)) continue;
+
+    // Skip if this transaction was already reclassified as a multi-hop
+    if (reclassifiedTxs.has(event.transactionHash)) {
+      seenKeys.add(key);
+      continue;
+    }
 
     const a0In = event.args[1], a1In = event.args[2], a0Out = event.args[3], a1Out = event.args[4];
     let symbolIn, symbolOut, amountIn, amountOut;
@@ -803,6 +923,12 @@ async function checkCrossPoolV3(p, fromBlock, toBlock) {
   for (const event of events) {
     const key = makeKey(event.transactionHash, event.logIndex);
     if (seenKeys.has(key)) continue;
+
+    // Skip if this transaction was already reclassified as a multi-hop
+    if (reclassifiedTxs.has(event.transactionHash)) {
+      seenKeys.add(key);
+      continue;
+    }
 
     const amount0 = event.args[2];
     const amount1 = event.args[3];
@@ -868,6 +994,7 @@ async function checkAllSwaps() {
 
     lastBlock = currentBlock;
     if (seenKeys.size > 5000) seenKeys.clear();
+    if (reclassifiedTxs.size > 2000) reclassifiedTxs.clear();
   } catch (e) {
     console.error("Check error:", e.message);
   }
@@ -881,6 +1008,7 @@ async function start() {
   console.log(`Router: ${ROUTER_ADDRESS}`);
   console.log("Enrichment: historical Position (block-1) + Market Cap + Holders");
   console.log("ETN price: CoinGecko → CoinPaprika → previous valid price (never on-chain pool)");
+  console.log("Swap classification: TOKEN↔TOKEN multi-hop correctly reported as SWAP (tx-level dedup across WETN + cross pools)");
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
