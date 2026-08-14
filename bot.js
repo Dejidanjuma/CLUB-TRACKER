@@ -101,7 +101,7 @@ const erc20Abi = [
   "function balanceOf(address) view returns (uint256)"
 ];
 
-let etnPriceUsd = 0.00071;
+let etnPriceUsd = 0.00071; // start with a reasonable market value
 let lastBlock = null;
 const tokenDecimals = {};
 const seenKeys = new Set();
@@ -299,7 +299,7 @@ async function getEtNPriceFromPool() {
 async function getExternalEtnPrice() {
   try {
     const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=electroneum&vs_currencies=usd", {
-      signal: AbortSignal.timeout(8000)
+      signal: AbortSignal.timeout(10000)
     });
     if (res.ok) {
       const data = await res.json();
@@ -307,6 +307,8 @@ async function getExternalEtnPrice() {
       if (p && p > 0 && isFinite(p)) {
         return { price: p, source: "CoinGecko" };
       }
+    } else {
+      console.error("CoinGecko HTTP status:", res.status);
     }
   } catch (e) {
     console.error("CoinGecko failed:", e.message);
@@ -314,6 +316,12 @@ async function getExternalEtnPrice() {
   return null;
 }
 
+/**
+ * Robust price update:
+ * 1. Prefer CoinGecko
+ * 2. If CoinGecko fails, only accept on-chain if it is close to the last good price
+ * 3. Otherwise keep the previous good price
+ */
 async function updatePrice() {
   const external = await getExternalEtnPrice();
 
@@ -323,12 +331,18 @@ async function updatePrice() {
     return;
   }
 
-  // CoinGecko failed – try on-chain as last resort
+  // CoinGecko failed – check on-chain carefully
   try {
     const onChain = await getEtNPriceFromPool();
     if (onChain && onChain > 0) {
-      etnPriceUsd = onChain;
-      console.log(`ETN price (on-chain fallback): $${etnPriceUsd}`);
+      const deviation = Math.abs(onChain - etnPriceUsd) / etnPriceUsd;
+
+      if (deviation <= 0.03) { // within 3% of last known good price
+        etnPriceUsd = onChain;
+        console.log(`ETN price (on-chain accepted, deviation ${(deviation*100).toFixed(2)}%): $${etnPriceUsd}`);
+      } else {
+        console.log(`⚠️ On-chain price rejected (deviation ${(deviation*100).toFixed(2)}% from last good price). Keeping $${etnPriceUsd}`);
+      }
       return;
     }
   } catch (e) {}
@@ -852,7 +866,7 @@ async function start() {
   console.log(`CLUB group: ${CLUB_GROUP_CHAT_ID} → LIVE TRADES topic (${LIVE_TRADES_TOPIC_ID}) ≥ $5 (CORE excluded)`);
   console.log(`Router: ${ROUTER_ADDRESS}`);
   console.log("Enrichment: historical Position (block-1) + Market Cap + Holders");
-  console.log("ETN price: CoinGecko only → previous value / on-chain as last resort");
+  console.log("ETN price: CoinGecko preferred → on-chain only if close to last good price");
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
