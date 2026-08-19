@@ -105,14 +105,13 @@ let etnPriceUsd = 0.00071;
 let lastBlock = null;
 const tokenDecimals = {};
 const seenKeys = new Set();
-const reclassifiedTxs = new Set(); // transaction-level dedup for multi-hop reclassifications
+const reclassifiedTxs = new Set();
 
 const supplyCache = new Map();
 const holdersCache = new Map();
 const SUPPLY_TTL = 3 * 60 * 1000;
 const HOLDERS_TTL = 8 * 60 * 1000;
 
-// Reverse lookup: address → symbol
 const ADDR_TO_SYMBOL = {};
 for (const [sym, addr] of Object.entries(ADDR)) {
   ADDR_TO_SYMBOL[addr.toLowerCase()] = sym;
@@ -303,12 +302,7 @@ async function getEtNPriceFromPool() {
   }
 }
 
-/**
- * Tries CoinGecko first, then CoinPaprika.
- * Returns { price, source } or null.
- */
 async function getExternalEtnPrice() {
-  // 1. CoinGecko
   try {
     const res = await fetch(
       "https://api.coingecko.com/api/v3/simple/price?ids=electroneum&vs_currencies=usd",
@@ -327,7 +321,6 @@ async function getExternalEtnPrice() {
     console.error("CoinGecko failed:", e.message);
   }
 
-  // 2. CoinPaprika
   try {
     const res = await fetch(
       "https://api.coinpaprika.com/v1/tickers/etn-electroneum",
@@ -349,14 +342,6 @@ async function getExternalEtnPrice() {
   return null;
 }
 
-/**
- * Price source order:
- * 1. CoinGecko
- * 2. CoinPaprika
- * 3. Previous valid etnPriceUsd
- *
- * NEVER uses the WETN/USDT on-chain pool.
- */
 async function updatePrice() {
   const external = await getExternalEtnPrice();
 
@@ -366,7 +351,6 @@ async function updatePrice() {
     return;
   }
 
-  // Both external sources failed – keep the last known good price
   console.log(`⚠️ CoinGecko and CoinPaprika unavailable`);
   console.log(`ETN price: $${etnPriceUsd} | Source: Previous valid price`);
 }
@@ -469,20 +453,15 @@ async function isGenuineLeg(txHash, wallet, tokenAddress, direction) {
   return transferInvolvesWallet(receipt, tokenAddress, wallet, direction);
 }
 
-/**
- * Analyse the full receipt to find the trader's net non-WETN token flows.
- * Returns an array of { symbol, address, amount, direction: "in"|"out" }
- * where amount is always positive.
- */
 function getTraderTokenFlows(receipt, wallet) {
   if (!receipt) return [];
   const walletTopic = walletTopicOf(wallet);
-  const flows = new Map(); // address → net BigInt (positive = received)
+  const flows = new Map();
 
   for (const log of receipt.logs) {
     if (log.topics[0] !== TRANSFER_TOPIC) continue;
     const tokenAddr = log.address.toLowerCase();
-    if (tokenAddr === WETN.toLowerCase()) continue; // ignore WETN itself
+    if (tokenAddr === WETN.toLowerCase()) continue;
 
     const isFrom = log.topics[1] && log.topics[1].toLowerCase() === walletTopic;
     const isTo   = log.topics[2] && log.topics[2].toLowerCase() === walletTopic;
@@ -498,7 +477,7 @@ function getTraderTokenFlows(receipt, wallet) {
   for (const [addr, net] of flows) {
     if (net === 0n) continue;
     const symbol = ADDR_TO_SYMBOL[addr];
-    if (!symbol) continue; // only care about tracked tokens
+    if (!symbol) continue;
     const dec = tokenDecimals[symbol] || 18;
     const amount = Number(ethers.formatUnits(net < 0n ? -net : net, dec));
     if (amount < 0.000001) continue;
@@ -585,6 +564,7 @@ function formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, txHash, wa
 async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0, symbol = null) {
   const opts = { parse_mode: "Markdown", disable_web_page_preview: true };
 
+  // 1. ALWAYS send to MAIN group
   try {
     if (gifUrl) {
       await bot.sendAnimation(CHAT_ID, gifUrl, {
@@ -601,11 +581,15 @@ async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0, symbol 
     } catch (e) {}
   }
 
-  if (
-    usdValue >= 5 &&
-    symbol &&
-    !LIVE_TRADES_EXCLUDED_SYMBOLS.has(symbol)
-  ) {
+  // 2. LIVE TRADES topic
+  // - WETN trades: only if usdValue >= 5 and not CORE
+  // - Pure TOKEN → TOKEN (symbol === null): always send
+  const isTokenToToken = symbol === null;
+  const qualifiesForLive =
+    isTokenToToken ||
+    (usdValue >= 5 && symbol && !LIVE_TRADES_EXCLUDED_SYMBOLS.has(symbol));
+
+  if (qualifiesForLive) {
     const topicOpts = {
       parse_mode: "Markdown",
       disable_web_page_preview: true,
@@ -711,14 +695,11 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
 
     const receipt = await getReceipt(event.transactionHash);
 
-    // ===== Multi-hop reclassification =====
     const flows = getTraderTokenFlows(receipt, wallet);
     const outs = flows.filter(f => f.direction === "out");
     const ins  = flows.filter(f => f.direction === "in");
 
-    // Require exactly one tracked OUT and one tracked IN
     if (outs.length === 1 && ins.length === 1) {
-      // Already reclassified this whole transaction?
       if (reclassifiedTxs.has(event.transactionHash)) {
         seenKeys.add(key);
         continue;
@@ -736,11 +717,10 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
 
       const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
       const gifUrl = pickCrossGif(symbolIn, symbolOut);
-      await sendMessageWithOptionalGif(message, gifUrl, 0);
+      await sendMessageWithOptionalGif(message, gifUrl, 0); // symbol = null → TOKEN→TOKEN
       console.log(`✅ Sent multi-hop ${symbolIn}→${symbolOut} (reclassified from ${p.symbol} WETN leg) [v2]`);
       continue;
     }
-    // ===== END multi-hop =====
 
     const tokenAmount = getBetterTokenAmount(receipt, p.token, wallet, direction, dec, tokenAmountFromSwap);
     wetnAmount = getNetWetnAmount(receipt, isBuy, wetnAmount);
@@ -798,14 +778,11 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
 
     const receipt = await getReceipt(event.transactionHash);
 
-    // ===== Multi-hop reclassification =====
     const flows = getTraderTokenFlows(receipt, wallet);
     const outs = flows.filter(f => f.direction === "out");
     const ins  = flows.filter(f => f.direction === "in");
 
-    // Require exactly one tracked OUT and one tracked IN
     if (outs.length === 1 && ins.length === 1) {
-      // Already reclassified this whole transaction?
       if (reclassifiedTxs.has(event.transactionHash)) {
         seenKeys.add(key);
         continue;
@@ -823,11 +800,10 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
 
       const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
       const gifUrl = pickCrossGif(symbolIn, symbolOut);
-      await sendMessageWithOptionalGif(message, gifUrl, 0);
+      await sendMessageWithOptionalGif(message, gifUrl, 0); // symbol = null → TOKEN→TOKEN
       console.log(`✅ Sent multi-hop ${symbolIn}→${symbolOut} (reclassified from ${p.symbol} WETN leg) [v3]`);
       continue;
     }
-    // ===== END multi-hop =====
 
     const tokenAmount = getBetterTokenAmount(receipt, p.token, wallet, direction, dec, tokenAmountFromSwap);
     wetnAmount = getNetWetnAmount(receipt, isBuy, wetnAmount);
@@ -863,7 +839,6 @@ async function checkCrossPoolV2(p, fromBlock, toBlock) {
     const key = makeKey(event.transactionHash, event.logIndex);
     if (seenKeys.has(key)) continue;
 
-    // Skip if this transaction was already reclassified as a multi-hop
     if (reclassifiedTxs.has(event.transactionHash)) {
       seenKeys.add(key);
       continue;
@@ -909,7 +884,7 @@ async function checkCrossPoolV2(p, fromBlock, toBlock) {
 
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
-    await sendMessageWithOptionalGif(message, gifUrl, usdValue);
+    await sendMessageWithOptionalGif(message, gifUrl, usdValue); // symbol = null → TOKEN→TOKEN
     console.log(`✅ Sent cross ${symbolIn}→${symbolOut}`);
   }
 }
@@ -924,7 +899,6 @@ async function checkCrossPoolV3(p, fromBlock, toBlock) {
     const key = makeKey(event.transactionHash, event.logIndex);
     if (seenKeys.has(key)) continue;
 
-    // Skip if this transaction was already reclassified as a multi-hop
     if (reclassifiedTxs.has(event.transactionHash)) {
       seenKeys.add(key);
       continue;
@@ -962,7 +936,7 @@ async function checkCrossPoolV3(p, fromBlock, toBlock) {
 
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
-    await sendMessageWithOptionalGif(message, gifUrl, usdValue);
+    await sendMessageWithOptionalGif(message, gifUrl, usdValue); // symbol = null → TOKEN→TOKEN
     console.log(`✅ Sent cross ${symbolIn}→${symbolOut}`);
   }
 }
@@ -1004,11 +978,12 @@ async function start() {
   console.log("Bot starting...");
   console.log(`Watching ${wetnPools.length} WETN pools + ${crossPools.length} cross pools`);
   console.log(`Main group: ${CHAT_ID}`);
-  console.log(`CLUB group: ${CLUB_GROUP_CHAT_ID} → LIVE TRADES topic (${LIVE_TRADES_TOPIC_ID}) ≥ $5 (CORE excluded)`);
+  console.log(`CLUB group: ${CLUB_GROUP_CHAT_ID} → LIVE TRADES topic (${LIVE_TRADES_TOPIC_ID})`);
+  console.log(`  - WETN trades: ≥ $5 (CORE excluded)`);
+  console.log(`  - TOKEN→TOKEN swaps: always sent to LIVE TRADES`);
   console.log(`Router: ${ROUTER_ADDRESS}`);
   console.log("Enrichment: historical Position (block-1) + Market Cap + Holders");
   console.log("ETN price: CoinGecko → CoinPaprika → previous valid price (never on-chain pool)");
-  console.log("Swap classification: TOKEN↔TOKEN multi-hop correctly reported as SWAP (tx-level dedup across WETN + cross pools)");
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
