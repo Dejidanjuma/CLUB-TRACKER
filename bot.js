@@ -26,6 +26,8 @@ const USDT_BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRA
 const USDT_SELL_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/usdt_sell.mp4";
 const USDC_BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/usdc_buy.mp4";
 const USDC_SELL_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/usdc_sell.mp4";
+const FUGAZI_BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/fugazi_buy.mp4";
+const FUGAZI_SELL_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/fugazi_sell.mp4";
 
 const provider = new ethers.JsonRpcProvider(RPC, { chainId: 52014, name: "electroneum" });
 const bot = new TelegramBot(BOT_TOKEN, { polling: false });
@@ -42,7 +44,8 @@ const ADDR = {
   SPIKE: "0x9bC7ab566e50A915016aE165A9c58Dad4e4828a1",
   USDC: "0x3187deAd7A2Bd6770F5Fe81495D1B715926AAe6e",
   USDT: "0x48E722f1458b253c2FB0E573F939318D7Dbd54e7",
-  CORE: "0x309B916b3A90cb3E071697Ea9680e9217A30066f"
+  CORE: "0x309B916b3A90cb3E071697Ea9680e9217A30066f",
+  FUGAZI: "0x075533AB8EeC6A6999F07C8bc2f1900eB8312e25"
 };
 
 const CLUB_WEBSITE = "https://planetetn.org/profile/4-etn-club-ninjars";
@@ -64,7 +67,8 @@ const wetnPools = [
   { symbol: "USDT", token: ADDR.USDT, pool: "0x0CC625331C9b22D94fEF29d462aB1c9B26dFF196", version: "v3", wetnIsToken0: true },
   { symbol: "USDT", token: ADDR.USDT, pool: "0xD6b16F3915d7A93D4235F8a2142Ef9f4bF865a76", version: "v3", wetnIsToken0: true },
   { symbol: "CORE", token: ADDR.CORE, pool: "0xc3FE6f98765493aB62AD87C9B5022Ff2FAA2e98D", version: "v2", wetnIsToken0: true },
-  { symbol: "CORE", token: ADDR.CORE, pool: "0xF0539385BD7057c81925382d1e74108Fc5c31bbC", version: "v3", wetnIsToken0: true }
+  { symbol: "CORE", token: ADDR.CORE, pool: "0xF0539385BD7057c81925382d1e74108Fc5c31bbC", version: "v3", wetnIsToken0: true },
+  { symbol: "FUGAZI", token: ADDR.FUGAZI, pool: "0x5F868b7E7345c0D6D4daD376521e6Ac4ac0CC836", version: "v2", wetnIsToken0: false }
 ];
 
 const crossPools = [
@@ -564,7 +568,6 @@ function formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, txHash, wa
 async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0, symbol = null) {
   const opts = { parse_mode: "Markdown", disable_web_page_preview: true };
 
-  // 1. ALWAYS send to MAIN group
   try {
     if (gifUrl) {
       await bot.sendAnimation(CHAT_ID, gifUrl, {
@@ -581,9 +584,6 @@ async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0, symbol 
     } catch (e) {}
   }
 
-  // 2. LIVE TRADES topic
-  // - WETN trades: only if usdValue >= 5 and not CORE
-  // - Pure TOKEN → TOKEN (symbol === null): always send
   const isTokenToToken = symbol === null;
   const qualifiesForLive =
     isTokenToToken ||
@@ -615,9 +615,25 @@ async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0, symbol 
   }
 }
 
-const BUY_GIFS = { CLUB: BUY_GIF_URL, BOLT: BOLT_BUY_GIF_URL, DYNO: DYNO_BUY_GIF_URL, CORE: CORE_BUY_GIF_URL, USDT: USDT_BUY_GIF_URL, USDC: USDC_BUY_GIF_URL };
-const SELL_GIFS = { CLUB: CLUB_SELL_GIF_URL, BOLT: BOLT_SELL_GIF_URL, DYNO: DYNO_SELL_GIF_URL, CORE: CORE_SELL_GIF_URL, USDT: USDT_SELL_GIF_URL, USDC: USDC_SELL_GIF_URL };
-const GIF_PRIORITY = ["CLUB", "BOLT", "DYNO", "CORE", "USDT", "USDC"];
+const BUY_GIFS = {
+  CLUB: BUY_GIF_URL,
+  BOLT: BOLT_BUY_GIF_URL,
+  DYNO: DYNO_BUY_GIF_URL,
+  CORE: CORE_BUY_GIF_URL,
+  USDT: USDT_BUY_GIF_URL,
+  USDC: USDC_BUY_GIF_URL,
+  FUGAZI: FUGAZI_BUY_GIF_URL
+};
+const SELL_GIFS = {
+  CLUB: CLUB_SELL_GIF_URL,
+  BOLT: BOLT_SELL_GIF_URL,
+  DYNO: DYNO_SELL_GIF_URL,
+  CORE: CORE_SELL_GIF_URL,
+  USDT: USDT_SELL_GIF_URL,
+  USDC: USDC_SELL_GIF_URL,
+  FUGAZI: FUGAZI_SELL_GIF_URL
+};
+const GIF_PRIORITY = ["CLUB", "BOLT", "DYNO", "CORE", "USDT", "USDC", "FUGAZI"];
 
 function pickWetnGif(symbol, isBuy) {
   return isBuy ? (BUY_GIFS[symbol] || null) : (SELL_GIFS[symbol] || null);
@@ -717,7 +733,7 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
 
       const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
       const gifUrl = pickCrossGif(symbolIn, symbolOut);
-      await sendMessageWithOptionalGif(message, gifUrl, 0); // symbol = null → TOKEN→TOKEN
+      await sendMessageWithOptionalGif(message, gifUrl, 0);
       console.log(`✅ Sent multi-hop ${symbolIn}→${symbolOut} (reclassified from ${p.symbol} WETN leg) [v2]`);
       continue;
     }
@@ -800,7 +816,7 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
 
       const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
       const gifUrl = pickCrossGif(symbolIn, symbolOut);
-      await sendMessageWithOptionalGif(message, gifUrl, 0); // symbol = null → TOKEN→TOKEN
+      await sendMessageWithOptionalGif(message, gifUrl, 0);
       console.log(`✅ Sent multi-hop ${symbolIn}→${symbolOut} (reclassified from ${p.symbol} WETN leg) [v3]`);
       continue;
     }
@@ -884,7 +900,7 @@ async function checkCrossPoolV2(p, fromBlock, toBlock) {
 
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
-    await sendMessageWithOptionalGif(message, gifUrl, usdValue); // symbol = null → TOKEN→TOKEN
+    await sendMessageWithOptionalGif(message, gifUrl, usdValue);
     console.log(`✅ Sent cross ${symbolIn}→${symbolOut}`);
   }
 }
@@ -936,7 +952,7 @@ async function checkCrossPoolV3(p, fromBlock, toBlock) {
 
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
-    await sendMessageWithOptionalGif(message, gifUrl, usdValue); // symbol = null → TOKEN→TOKEN
+    await sendMessageWithOptionalGif(message, gifUrl, usdValue);
     console.log(`✅ Sent cross ${symbolIn}→${symbolOut}`);
   }
 }
@@ -984,6 +1000,7 @@ async function start() {
   console.log(`Router: ${ROUTER_ADDRESS}`);
   console.log("Enrichment: historical Position (block-1) + Market Cap + Holders");
   console.log("ETN price: CoinGecko → CoinPaprika → previous valid price (never on-chain pool)");
+  console.log("FUGAZI support: enabled (V2 pool)");
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
