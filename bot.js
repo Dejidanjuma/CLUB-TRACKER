@@ -19,8 +19,12 @@ const WETN_USDT_POOL = "0x0CC625331C9b22D94fEF29d462aB1c9B26dFF196";
 const ENS_REGISTRY = "0x6f311f2212593165988dff84977e24c1005dbb85";
 const ENS_REVERSE_REGISTRAR = "0xfbb14edbd8d3f6e7bb240bfa388f6582df0d8e7a";
 const ENS_PUBLIC_RESOLVER = "0xdb4a3abb6703232e20a118a104e7f4ebb3e2738d";
-const ENS_NAME_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const ENS_RESOLVE_TIMEOUT_MS = 2500;
+const ENS_UNIVERSAL_RESOLVER = "0x75509153af7db00beecc30ec042299fd30e2cb6e";
+const ENS_NAME_CACHE_TTL_MS = 45 * 1000;
+const ENS_NONE_CACHE_TTL_MS = 45 * 1000;
+const ENS_ERROR_CACHE_TTL_MS = 20 * 1000;
+const ENS_RESOLVE_TIMEOUT_MS = 4000;
+const ENS_ETN_COIN_TYPE = 0x80000000 + 52014;
 
 const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.mp4";
 const CLUB_SELL_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_sell.mp4";
@@ -123,6 +127,11 @@ const ensResolverAbi = [
   "function name(bytes32 node) view returns (string)",
   "function addr(bytes32 node) view returns (address)"
 ];
+const ensUniversalResolverAbi = [
+  "function reverse(bytes lookupAddress, uint256 coinType) view returns (string, address, address)",
+  "function resolve(bytes name, bytes data) view returns (bytes result, address resolver)",
+  "error ReverseAddressMismatch(string primary, bytes primaryAddress)"
+];
 
 let etnPriceUsd = 0.00071;
 let lastBlock = null;
@@ -156,6 +165,7 @@ const CROSS_POOL_ADDRS = crossPools.map((p) => p.pool);
 
 const ensRegistry = new ethers.Contract(ENS_REGISTRY, ensRegistryAbi, provider);
 const ensReverseRegistrar = new ethers.Contract(ENS_REVERSE_REGISTRAR, ensReverseRegistrarAbi, provider);
+const ensUniversalResolver = new ethers.Contract(ENS_UNIVERSAL_RESOLVER, ensUniversalResolverAbi, provider);
 
 function formatTokenAmount(num) {
   if (num == null || isNaN(num)) return "0";
@@ -198,13 +208,23 @@ function formatPosition(pct) {
 }
 
 function withTimeout(promise, ms) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("ENS resolve timeout")), ms))
-  ]);
+  let timer;
+  const wrapped = Promise.resolve(promise).then(
+    (value) => {
+      clearTimeout(timer);
+      return value;
+    },
+    (err) => {
+      clearTimeout(timer);
+      throw err;
+    }
+  );
+  wrapped.catch(() => {});
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("ENS resolve timeout")), ms);
+  });
+  return Promise.race([wrapped, timeout]);
 }
-
-const ENS_ERROR_CACHE_TTL_MS = 60 * 1000;
 
 function cacheEtnName(walletLc, name, ttlMs = ENS_NAME_CACHE_TTL_MS) {
   walletNameCache.set(walletLc, { name, ts: Date.now(), ttlMs });
@@ -217,6 +237,104 @@ function cacheEtnName(walletLc, name, ttlMs = ENS_NAME_CACHE_TTL_MS) {
   }
 }
 
+function normalizeEtnName(name) {
+  if (!name || typeof name !== "string") return null;
+  const n = name.trim().toLowerCase();
+  if (!n.endsWith(".etn")) return null;
+  return n;
+}
+
+async function verifyForwardAddr(name, walletLc) {
+  const fwdNode = ethers.namehash(name);
+  try {
+    const data = new ethers.Interface(["function addr(bytes32) view returns (address)"]).encodeFunctionData("addr", [fwdNode]);
+    const [raw] = await ensUniversalResolver.resolve(ethers.dnsEncode(name), data);
+    const [fwdAddr] = ethers.AbiCoder.defaultAbiCoder().decode(["address"], raw);
+    console.log("[ENS DEBUG] UR forwardAddr", name, "=", fwdAddr);
+    if (fwdAddr && fwdAddr !== ethers.ZeroAddress) {
+      return fwdAddr.toLowerCase() === walletLc;
+    }
+  } catch (e) {
+    console.log("[ENS DEBUG] UR forward resolve failed for", name, e.message);
+  }
+
+  const fwdResolverAddr = await ensRegistry.resolver(fwdNode);
+  console.log("[ENS DEBUG] registry forwardResolver", name, "=", fwdResolverAddr);
+  if (!fwdResolverAddr || fwdResolverAddr === ethers.ZeroAddress) return false;
+  const fwdResolver = new ethers.Contract(fwdResolverAddr, ensResolverAbi, provider);
+  const fwdAddr = await fwdResolver.addr(fwdNode);
+  console.log("[ENS DEBUG] registry forwardAddr", name, "=", fwdAddr);
+  if (!fwdAddr || fwdAddr === ethers.ZeroAddress) return false;
+  return fwdAddr.toLowerCase() === walletLc;
+}
+
+function extractRevertData(err) {
+  if (!err) return null;
+  const candidates = [
+    err.data,
+    err.error && err.error.data,
+    err.info && err.info.error && err.info.error.data,
+    err.cause && err.cause.data,
+    err.payload && err.payload.data,
+    err.value
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.startsWith("0x") && c.length >= 10) return c;
+    if (c && typeof c === "object" && typeof c.data === "string" && c.data.startsWith("0x")) return c.data;
+  }
+  return null;
+}
+
+function decodeUniversalReverseName(err) {
+  const data = extractRevertData(err);
+  if (!data) return null;
+  try {
+    const decoded = ensUniversalResolver.interface.parseError(data);
+    if (decoded && decoded.name === "ReverseAddressMismatch") {
+      return normalizeEtnName(decoded.args[0]);
+    }
+  } catch (_) {}
+  return null;
+}
+
+async function resolveViaUniversalResolver(walletLc) {
+  const lookupBytes = ethers.getBytes(walletLc);
+  for (const coinType of [ENS_ETN_COIN_TYPE, 60n]) {
+    try {
+      const result = await ensUniversalResolver.reverse(lookupBytes, coinType);
+      const primary = normalizeEtnName(result[0]);
+      console.log("[ENS DEBUG] UR reverse coinType", coinType.toString(), "verified primary candidate =", primary);
+      if (primary && await verifyForwardAddr(primary, walletLc)) {
+        console.log("[ENS DEBUG] using verified primary", primary);
+        return primary;
+      }
+    } catch (e) {
+      const mismatchName = decodeUniversalReverseName(e);
+      console.log("[ENS DEBUG] UR reverse coinType", coinType.toString(), "mismatch candidate =", mismatchName, "err =", e.message);
+      if (mismatchName && await verifyForwardAddr(mismatchName, walletLc)) {
+        console.log("[ENS DEBUG] using ElectroSwap-compatible display name", mismatchName);
+        return mismatchName;
+      }
+    }
+  }
+  return null;
+}
+
+async function resolveViaReverseRegistrar(walletLc) {
+  const reverseNode = await ensReverseRegistrar.node(walletLc);
+  console.log("[ENS DEBUG] reverseNode =", reverseNode);
+  const resolverAddr = await ensRegistry.resolver(reverseNode);
+  console.log("[ENS DEBUG] reverseResolver =", resolverAddr);
+  if (!resolverAddr || resolverAddr === ethers.ZeroAddress) return null;
+
+  const resolver = new ethers.Contract(resolverAddr, ensResolverAbi, provider);
+  const primary = normalizeEtnName(await resolver.name(reverseNode));
+  console.log("[ENS DEBUG] reverseName =", primary);
+  if (!primary) return null;
+  if (await verifyForwardAddr(primary, walletLc)) return primary;
+  return null;
+}
+
 async function resolveEtnName(wallet) {
   if (!wallet) return null;
   const walletLc = wallet.toLowerCase();
@@ -227,31 +345,14 @@ async function resolveEtnName(wallet) {
 
   try {
     const name = await withTimeout((async () => {
-      const reverseNode = await ensReverseRegistrar.node(walletLc);
-      const resolverAddr = await ensRegistry.resolver(reverseNode);
-      if (!resolverAddr || resolverAddr === ethers.ZeroAddress) {
-        return null;
-      }
-
-      const resolver = new ethers.Contract(resolverAddr, ensResolverAbi, provider);
-      let primary = await resolver.name(reverseNode);
-
-      if (!primary || typeof primary !== "string") return null;
-      primary = primary.trim().toLowerCase();
-      if (!primary.endsWith(".etn")) return null;
-
-      const fwdNode = ethers.namehash(primary);
-      const fwdResolverAddr = await ensRegistry.resolver(fwdNode);
-      if (!fwdResolverAddr || fwdResolverAddr === ethers.ZeroAddress) return null;
-      const fwdResolver = new ethers.Contract(fwdResolverAddr, ensResolverAbi, provider);
-      const fwdAddr = await fwdResolver.addr(fwdNode);
-      if (!fwdAddr || fwdAddr === ethers.ZeroAddress) return null;
-      if (fwdAddr.toLowerCase() !== walletLc) return null;
-
-      return primary;
+      console.log("[ENS DEBUG] wallet =", walletLc);
+      const fromUr = await resolveViaUniversalResolver(walletLc);
+      if (fromUr) return fromUr;
+      return resolveViaReverseRegistrar(walletLc);
     })(), ENS_RESOLVE_TIMEOUT_MS);
 
-    cacheEtnName(walletLc, name || null, ENS_NAME_CACHE_TTL_MS);
+    if (name) cacheEtnName(walletLc, name, ENS_NAME_CACHE_TTL_MS);
+    else cacheEtnName(walletLc, null, ENS_NONE_CACHE_TTL_MS);
     return name || null;
   } catch (e) {
     console.error("ENS resolve failed:", e.message);
@@ -280,6 +381,18 @@ function prefetchEtnName(wallet) {
   resolveEtnName(wallet)
     .catch((e) => console.error("ENS prefetch failed:", e.message))
     .finally(() => ensInFlight.delete(walletLc));
+}
+
+async function getEtnNameForAlert(wallet) {
+  if (!wallet) return null;
+  const cached = getCachedEtnName(wallet);
+  if (cached) return cached;
+  try {
+    return await resolveEtnName(wallet);
+  } catch (e) {
+    console.error("ENS alert lookup failed:", e.message);
+    return null;
+  }
 }
 
 async function getTotalSupply(tokenAddress, decimals) {
@@ -625,7 +738,7 @@ function walletLinkParts(wallet) {
 function formatWalletField(roleLabel, wallet, etnName) {
   const { link, short } = walletLinkParts(wallet);
   if (etnName) {
-    return "👤 *" + roleLabel + ":* " + etnName + "\n[`" + short + "`](" + link + ")\n";
+    return "👤 *" + roleLabel + ":* [" + etnName + "](" + link + ")\n";
   }
   return "👤 *" + roleLabel + ":* [" + short + "](" + link + ")\n";
 }
@@ -954,7 +1067,7 @@ async function processWetnV2Event(p, event) {
       const symbolOut = inFlow.symbol;
       const amountOut = inFlow.amount;
 
-      const etnName = getCachedEtnName(wallet);
+      const etnName = await getEtnNameForAlert(wallet);
       prefetchEtnName(wallet);
       const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool, etnName);
       const gifUrl = pickCrossGif(symbolIn, symbolOut);
@@ -984,7 +1097,7 @@ async function processWetnV2Event(p, event) {
 
     seenKeys.add(key);
 
-    const etnName = getCachedEtnName(wallet);
+    const etnName = await getEtnNameForAlert(wallet);
     prefetchEtnName(wallet);
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel, enrichment, etnName);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
@@ -1040,7 +1153,7 @@ async function processWetnV3Event(p, event) {
       const symbolOut = inFlow.symbol;
       const amountOut = inFlow.amount;
 
-      const etnName = getCachedEtnName(wallet);
+      const etnName = await getEtnNameForAlert(wallet);
       prefetchEtnName(wallet);
       const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool, etnName);
       const gifUrl = pickCrossGif(symbolIn, symbolOut);
@@ -1070,7 +1183,7 @@ async function processWetnV3Event(p, event) {
 
     seenKeys.add(key);
 
-    const etnName = getCachedEtnName(wallet);
+    const etnName = await getEtnNameForAlert(wallet);
     prefetchEtnName(wallet);
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel, enrichment, etnName);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
@@ -1129,7 +1242,7 @@ async function processCrossV2Event(p, event) {
 
     seenKeys.add(key);
 
-    const etnName = getCachedEtnName(wallet);
+    const etnName = await getEtnNameForAlert(wallet);
     prefetchEtnName(wallet);
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool, etnName);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
@@ -1180,7 +1293,7 @@ async function processCrossV3Event(p, event) {
 
     seenKeys.add(key);
 
-    const etnName = getCachedEtnName(wallet);
+    const etnName = await getEtnNameForAlert(wallet);
     prefetchEtnName(wallet);
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool, etnName);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
@@ -1321,7 +1434,7 @@ async function start() {
   console.log("Enrichment: historical Position (block-1) + Market Cap + Holders");
   console.log("ETN price: CoinGecko → CoinPaprika → previous valid price (never on-chain pool)");
   console.log("FUGAZI support: enabled (V2 pool)");
-  console.log("ENS: address → .etn via official Electroneum Registry + ReverseRegistrar");
+  console.log("ENS: verified primary, else UR ReverseAddressMismatch name if forward addr matches wallet");
   console.log("Phase B scheduler: 1.5s head poll + sequential catch-up + batched getLogs");
   await loadDecimals();
   await updatePrice();
