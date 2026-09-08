@@ -142,6 +142,18 @@ for (const [sym, addr] of Object.entries(ADDR)) {
   ADDR_TO_SYMBOL[addr.toLowerCase()] = sym;
 }
 
+const WETN_POOL_BY_ADDR = {};
+for (const p of wetnPools) WETN_POOL_BY_ADDR[p.pool.toLowerCase()] = p;
+const CROSS_POOL_BY_ADDR = {};
+for (const p of crossPools) CROSS_POOL_BY_ADDR[p.pool.toLowerCase()] = p;
+
+const V2_SWAP_TOPIC = ethers.id("Swap(address,uint256,uint256,uint256,uint256,address)");
+const V3_SWAP_TOPIC = ethers.id("Swap(address,address,int256,int256,uint160,uint128,int24)");
+const v2Iface = new ethers.Interface(v2Abi);
+const v3Iface = new ethers.Interface(v3Abi);
+const WETN_POOL_ADDRS = wetnPools.map((p) => p.pool);
+const CROSS_POOL_ADDRS = crossPools.map((p) => p.pool);
+
 const ensRegistry = new ethers.Contract(ENS_REGISTRY, ensRegistryAbi, provider);
 const ensReverseRegistrar = new ethers.Contract(ENS_REVERSE_REGISTRAR, ensReverseRegistrarAbi, provider);
 
@@ -562,7 +574,7 @@ function getNetWetnAmount(receipt, isBuy, fallbackAmount) {
 
 async function isGenuineLeg(txHash, wallet, tokenAddress, direction) {
   const receipt = await getReceipt(txHash);
-  if (!receipt) return false;
+  if (!receipt) return null;
   return transferInvolvesWallet(receipt, tokenAddress, wallet, direction);
 }
 
@@ -696,7 +708,9 @@ async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0, symbol 
     console.error("Send failed to main group:", err.message);
     try {
       await bot.sendMessage(CHAT_ID, message, opts);
-    } catch (e) {}
+    } catch (e) {
+      throw new Error("Telegram main send failed: " + (e.message || err.message));
+    }
   }
 
   const isTokenToToken = symbol === null;
@@ -774,10 +788,24 @@ function claimSeen(key) {
   return true;
 }
 
+function releaseSeen(key) {
+  seenKeys.delete(key);
+}
+
 function claimReclassified(txHash) {
   if (reclassifiedTxs.has(txHash)) return false;
   reclassifiedTxs.add(txHash);
   return true;
+}
+
+function releaseReclassified(txHash) {
+  reclassifiedTxs.delete(txHash);
+}
+
+function failRetryableEvent(key, reason, txHash = null, reclassClaimed = false) {
+  releaseSeen(key);
+  if (reclassClaimed && txHash) releaseReclassified(txHash);
+  throw new Error(reason);
 }
 
 const CIRCLE_MIN = 1;
@@ -802,14 +830,86 @@ function buildCircles(isBuy, usdValue) {
   return result;
 }
 
-async function checkWetnPoolV2(p, fromBlock, toBlock) {
-  const pool = new ethers.Contract(p.pool, v2Abi, provider);
-  const events = await pool.queryFilter("Swap", fromBlock, toBlock);
-  const dec = tokenDecimals[p.symbol] || 18;
+async function fetchSwapLogsPerPool(addresses, fromBlock, toBlock) {
+  const out = [];
+  let failed = 0;
+  for (const addr of addresses) {
+    const cfg = WETN_POOL_BY_ADDR[addr.toLowerCase()] || CROSS_POOL_BY_ADDR[addr.toLowerCase()];
+    if (!cfg) continue;
+    try {
+      const abi = cfg.version === "v2" ? v2Abi : v3Abi;
+      const c = new ethers.Contract(addr, abi, provider);
+      const events = await c.queryFilter("Swap", fromBlock, toBlock);
+      for (const ev of events) {
+        out.push({
+          address: addr,
+          transactionHash: ev.transactionHash,
+          index: ev.index != null ? ev.index : ev.logIndex,
+          topics: ev.topics,
+          data: ev.data
+        });
+      }
+    } catch (e) {
+      failed += 1;
+      console.error(`queryFilter fallback failed ${addr.slice(0, 10)}:`, e.message);
+    }
+  }
+  return { logs: out, ok: failed === 0, failed };
+}
 
-  for (const event of events) {
+async function fetchSwapLogs(addresses, fromBlock, toBlock) {
+  try {
+    const logs = await provider.getLogs({
+      address: addresses,
+      topics: [[V2_SWAP_TOPIC, V3_SWAP_TOPIC]],
+      fromBlock,
+      toBlock
+    });
+    return { logs, ok: true, failed: 0 };
+  } catch (e) {
+    console.error("Batched getLogs failed, using per-pool fallback:", e.message);
+    return fetchSwapLogsPerPool(addresses, fromBlock, toBlock);
+  }
+}
+
+function decodeSwapLog(log) {
+  const topic = (log.topics && log.topics[0])
+    ? log.topics[0].toLowerCase()
+    : "";
+
+  try {
+    if (topic === V2_SWAP_TOPIC.toLowerCase()) {
+      const parsed = v2Iface.parseLog(log);
+      return {
+        transactionHash: log.transactionHash,
+        logIndex: log.index != null ? log.index : log.logIndex,
+        args: parsed.args,
+        version: "v2"
+      };
+    }
+
+    if (topic === V3_SWAP_TOPIC.toLowerCase()) {
+      const parsed = v3Iface.parseLog(log);
+      return {
+        transactionHash: log.transactionHash,
+        logIndex: log.index != null ? log.index : log.logIndex,
+        args: parsed.args,
+        version: "v3"
+      };
+    }
+
+    throw new Error(`Unknown Swap topic ${topic}`);
+  } catch (e) {
+    throw new Error(
+      `decodeSwapLog failed for ${log.transactionHash || "unknown tx"}: ${e.message}`
+    );
+  }
+}
+
+async function processWetnV2Event(p, event) {
+  const dec = tokenDecimals[p.symbol] || 18;
     const key = makeKey(event.transactionHash, event.logIndex);
-    if (!claimSeen(key)) continue;
+    if (!claimSeen(key)) return;
 
     const a0In = event.args[1], a1In = event.args[2], a0Out = event.args[3], a1Out = event.args[4];
     let isBuy, wetnAmount, tokenAmountFromSwap;
@@ -824,26 +924,28 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
       tokenAmountFromSwap = Number(ethers.formatUnits(isBuy ? a0Out : a0In, dec));
     }
 
-    if (tokenAmountFromSwap < 0.000001 || wetnAmount < 0.000001) continue;
+    if (tokenAmountFromSwap < 0.000001 || wetnAmount < 0.000001) return;
 
     const wallet = await getTraderWallet(event.transactionHash);
-    if (!wallet) continue;
+    if (!wallet) failRetryableEvent(key, "receipt/wallet unavailable " + event.transactionHash.slice(0, 10));
 
     const direction = isBuy ? "to" : "from";
     const genuine = await isGenuineLeg(event.transactionHash, wallet, p.token, direction);
+    if (genuine == null) failRetryableEvent(key, "genuine-leg receipt unavailable " + event.transactionHash.slice(0, 10));
     if (!genuine) {
       console.log(`⏭️ Skipped ${p.symbol} ${isBuy ? "BUY" : "SELL"} (intermediate hop) [v2]`);
-      continue;
+      return;
     }
 
     const receipt = await getReceipt(event.transactionHash);
+    if (!receipt) failRetryableEvent(key, "receipt unavailable " + event.transactionHash.slice(0, 10));
 
     const flows = getTraderTokenFlows(receipt, wallet);
     const outs = flows.filter(f => f.direction === "out");
     const ins  = flows.filter(f => f.direction === "in");
 
     if (outs.length === 1 && ins.length === 1) {
-      if (!claimReclassified(event.transactionHash)) continue;
+      if (!claimReclassified(event.transactionHash)) return;
 
       const outFlow = outs[0];
       const inFlow  = ins[0];
@@ -856,9 +958,13 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
       prefetchEtnName(wallet);
       const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool, etnName);
       const gifUrl = pickCrossGif(symbolIn, symbolOut);
-      await sendMessageWithOptionalGif(message, gifUrl, 0);
+      try {
+        await sendMessageWithOptionalGif(message, gifUrl, 0);
+      } catch (e) {
+        failRetryableEvent(key, e.message, event.transactionHash, true);
+      }
       console.log(`✅ Sent multi-hop ${symbolIn}→${symbolOut} (reclassified from ${p.symbol} WETN leg) [v2]`);
-      continue;
+      return;
     }
 
     const tokenAmount = getBetterTokenAmount(receipt, p.token, wallet, direction, dec, tokenAmountFromSwap);
@@ -882,19 +988,18 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
     prefetchEtnName(wallet);
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel, enrichment, etnName);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
-    await sendMessageWithOptionalGif(message, gifUrl, usdValue, p.symbol);
+    try {
+      await sendMessageWithOptionalGif(message, gifUrl, usdValue, p.symbol);
+    } catch (e) {
+      failRetryableEvent(key, e.message);
+    }
     console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} | Amount: ${formatTokenAmount(tokenAmount)} [v2]`);
-  }
 }
 
-async function checkWetnPoolV3(p, fromBlock, toBlock) {
-  const pool = new ethers.Contract(p.pool, v3Abi, provider);
-  const events = await pool.queryFilter("Swap", fromBlock, toBlock);
+async function processWetnV3Event(p, event) {
   const dec = tokenDecimals[p.symbol] || 18;
-
-  for (const event of events) {
     const key = makeKey(event.transactionHash, event.logIndex);
-    if (!claimSeen(key)) continue;
+    if (!claimSeen(key)) return;
 
     const amount0 = event.args[2];
     const amount1 = event.args[3];
@@ -905,26 +1010,28 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
     let wetnAmount = Number(ethers.formatUnits(wetnRaw < 0n ? -wetnRaw : wetnRaw, 18));
     const tokenAmountFromSwap = Number(ethers.formatUnits(tokenRaw < 0n ? -tokenRaw : tokenRaw, dec));
 
-    if (tokenAmountFromSwap < 0.000001 || wetnAmount < 0.000001) continue;
+    if (tokenAmountFromSwap < 0.000001 || wetnAmount < 0.000001) return;
 
     const wallet = await getTraderWallet(event.transactionHash);
-    if (!wallet) continue;
+    if (!wallet) failRetryableEvent(key, "receipt/wallet unavailable " + event.transactionHash.slice(0, 10));
 
     const direction = isBuy ? "to" : "from";
     const genuine = await isGenuineLeg(event.transactionHash, wallet, p.token, direction);
+    if (genuine == null) failRetryableEvent(key, "genuine-leg receipt unavailable " + event.transactionHash.slice(0, 10));
     if (!genuine) {
       console.log(`⏭️ Skipped ${p.symbol} ${isBuy ? "BUY" : "SELL"} (intermediate hop) [v3]`);
-      continue;
+      return;
     }
 
     const receipt = await getReceipt(event.transactionHash);
+    if (!receipt) failRetryableEvent(key, "receipt unavailable " + event.transactionHash.slice(0, 10));
 
     const flows = getTraderTokenFlows(receipt, wallet);
     const outs = flows.filter(f => f.direction === "out");
     const ins  = flows.filter(f => f.direction === "in");
 
     if (outs.length === 1 && ins.length === 1) {
-      if (!claimReclassified(event.transactionHash)) continue;
+      if (!claimReclassified(event.transactionHash)) return;
 
       const outFlow = outs[0];
       const inFlow  = ins[0];
@@ -937,9 +1044,13 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
       prefetchEtnName(wallet);
       const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool, etnName);
       const gifUrl = pickCrossGif(symbolIn, symbolOut);
-      await sendMessageWithOptionalGif(message, gifUrl, 0);
+      try {
+        await sendMessageWithOptionalGif(message, gifUrl, 0);
+      } catch (e) {
+        failRetryableEvent(key, e.message, event.transactionHash, true);
+      }
       console.log(`✅ Sent multi-hop ${symbolIn}→${symbolOut} (reclassified from ${p.symbol} WETN leg) [v3]`);
-      continue;
+      return;
     }
 
     const tokenAmount = getBetterTokenAmount(receipt, p.token, wallet, direction, dec, tokenAmountFromSwap);
@@ -963,22 +1074,21 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
     prefetchEtnName(wallet);
     const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel, enrichment, etnName);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
-    await sendMessageWithOptionalGif(message, gifUrl, usdValue, p.symbol);
+    try {
+      await sendMessageWithOptionalGif(message, gifUrl, usdValue, p.symbol);
+    } catch (e) {
+      failRetryableEvent(key, e.message);
+    }
     console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} | Amount: ${formatTokenAmount(tokenAmount)} [v3]`);
-  }
 }
 
-async function checkCrossPoolV2(p, fromBlock, toBlock) {
-  const pool = new ethers.Contract(p.pool, v2Abi, provider);
-  const events = await pool.queryFilter("Swap", fromBlock, toBlock);
+async function processCrossV2Event(p, event) {
   const decA = tokenDecimals[p.symbolA] || 18;
   const decB = tokenDecimals[p.symbolB] || 18;
-
-  for (const event of events) {
     const key = makeKey(event.transactionHash, event.logIndex);
-    if (!claimSeen(key)) continue;
+    if (!claimSeen(key)) return;
 
-    if (reclassifiedTxs.has(event.transactionHash)) continue;
+    if (reclassifiedTxs.has(event.transactionHash)) return;
 
     const a0In = event.args[1], a1In = event.args[2], a0Out = event.args[3], a1Out = event.args[4];
     let symbolIn, symbolOut, amountIn, amountOut;
@@ -1004,13 +1114,14 @@ async function checkCrossPoolV2(p, fromBlock, toBlock) {
       }
     }
 
-    if (amountIn < 0.000001 || amountOut < 0.000001) continue;
+    if (amountIn < 0.000001 || amountOut < 0.000001) return;
 
     const wallet = await getTraderWallet(event.transactionHash);
-    if (!wallet) continue;
+    if (!wallet) failRetryableEvent(key, "receipt/wallet unavailable " + event.transactionHash.slice(0, 10));
 
     const genuineIn = await isGenuineLeg(event.transactionHash, wallet, ADDR[symbolIn], "from");
-    if (!genuineIn) continue;
+    if (genuineIn == null) failRetryableEvent(key, "genuine-leg receipt unavailable " + event.transactionHash.slice(0, 10));
+    if (!genuineIn) return;
 
     let usdValue = 0;
     if (STABLES.includes(symbolIn)) usdValue = amountIn;
@@ -1022,22 +1133,21 @@ async function checkCrossPoolV2(p, fromBlock, toBlock) {
     prefetchEtnName(wallet);
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool, etnName);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
-    await sendMessageWithOptionalGif(message, gifUrl, usdValue);
+    try {
+      await sendMessageWithOptionalGif(message, gifUrl, usdValue);
+    } catch (e) {
+      failRetryableEvent(key, e.message);
+    }
     console.log(`✅ Sent cross ${symbolIn}→${symbolOut}`);
-  }
 }
 
-async function checkCrossPoolV3(p, fromBlock, toBlock) {
-  const pool = new ethers.Contract(p.pool, v3Abi, provider);
-  const events = await pool.queryFilter("Swap", fromBlock, toBlock);
+async function processCrossV3Event(p, event) {
   const decA = tokenDecimals[p.symbolA] || 18;
   const decB = tokenDecimals[p.symbolB] || 18;
-
-  for (const event of events) {
     const key = makeKey(event.transactionHash, event.logIndex);
-    if (!claimSeen(key)) continue;
+    if (!claimSeen(key)) return;
 
-    if (reclassifiedTxs.has(event.transactionHash)) continue;
+    if (reclassifiedTxs.has(event.transactionHash)) return;
 
     const amount0 = event.args[2];
     const amount1 = event.args[3];
@@ -1055,13 +1165,14 @@ async function checkCrossPoolV3(p, fromBlock, toBlock) {
       amountOut = Number(ethers.formatUnits(aRaw < 0n ? -aRaw : aRaw, decA));
     }
 
-    if (amountIn < 0.000001 || amountOut < 0.000001) continue;
+    if (amountIn < 0.000001 || amountOut < 0.000001) return;
 
     const wallet = await getTraderWallet(event.transactionHash);
-    if (!wallet) continue;
+    if (!wallet) failRetryableEvent(key, "receipt/wallet unavailable " + event.transactionHash.slice(0, 10));
 
     const genuineIn = await isGenuineLeg(event.transactionHash, wallet, ADDR[symbolIn], "from");
-    if (!genuineIn) continue;
+    if (genuineIn == null) failRetryableEvent(key, "genuine-leg receipt unavailable " + event.transactionHash.slice(0, 10));
+    if (!genuineIn) return;
 
     let usdValue = 0;
     if (STABLES.includes(symbolIn)) usdValue = amountIn;
@@ -1073,76 +1184,130 @@ async function checkCrossPoolV3(p, fromBlock, toBlock) {
     prefetchEtnName(wallet);
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool, etnName);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
-    await sendMessageWithOptionalGif(message, gifUrl, usdValue);
-    console.log(`✅ Sent cross ${symbolIn}→${symbolOut}`);
-  }
-}
-
-const POOL_CONCURRENCY = 6;
-let checkAllSwapsRunning = false;
-
-async function mapWithConcurrency(items, limit, worker) {
-  const results = new Array(items.length);
-  let nextIndex = 0;
-  async function runOne() {
-    while (true) {
-      const i = nextIndex++;
-      if (i >= items.length) return;
-      results[i] = await worker(items[i], i);
+    try {
+      await sendMessageWithOptionalGif(message, gifUrl, usdValue);
+    } catch (e) {
+      failRetryableEvent(key, e.message);
     }
-  }
-  const runners = [];
-  const n = Math.min(limit, items.length);
-  for (let i = 0; i < n; i++) runners.push(runOne());
-  await Promise.all(runners);
-  return results;
+    console.log(`✅ Sent cross ${symbolIn}→${symbolOut}`);
 }
 
-async function checkAllSwaps() {
-  if (checkAllSwapsRunning) {
-    console.log("[PERF] skipped overlapping checkAllSwaps");
-    return;
-  }
-  checkAllSwapsRunning = true;
-  const t0 = Date.now();
+const POLL_HEAD_MS = 1500;
+const SCAN_RETRY_MS = 2000;
+const STARTUP_LOOKBACK_BLOCKS = 200;
+let latestHead = null;
+let schedulerRunning = false;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function processDecodedWetn(log) {
+  const p = WETN_POOL_BY_ADDR[log.address.toLowerCase()];
+  if (!p) return;
+  const event = decodeSwapLog(log);
   try {
-    const currentBlock = await provider.getBlockNumber();
-    const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 200;
-    if (fromBlock > currentBlock) return;
-    console.log(`Checking blocks ${fromBlock} to ${currentBlock}`);
-    console.log(`[PERF] block=${currentBlock} range=${fromBlock}-${currentBlock}`);
-
-    const tw = Date.now();
-    await mapWithConcurrency(wetnPools, POOL_CONCURRENCY, async (p) => {
-      try {
-        if (p.version === "v2") await checkWetnPoolV2(p, fromBlock, currentBlock);
-        else await checkWetnPoolV3(p, fromBlock, currentBlock);
-      } catch (e) {
-        console.error(`Error ${p.symbol}:`, e.message);
-      }
-    });
-    const wetnMs = Date.now() - tw;
-
-    const tc = Date.now();
-    await mapWithConcurrency(crossPools, POOL_CONCURRENCY, async (p) => {
-      try {
-        if (p.version === "v2") await checkCrossPoolV2(p, fromBlock, currentBlock);
-        else await checkCrossPoolV3(p, fromBlock, currentBlock);
-      } catch (e) {
-        console.error(`Error cross ${p.symbolA}/${p.symbolB}:`, e.message);
-      }
-    });
-    const crossMs = Date.now() - tc;
-
-    lastBlock = currentBlock;
-    if (seenKeys.size > 5000) seenKeys.clear();
-    if (reclassifiedTxs.size > 2000) reclassifiedTxs.clear();
-    console.log(`[PERF] checkAllSwaps=${Date.now() - t0}ms wetnScan=${wetnMs}ms crossScan=${crossMs}ms pools=${wetnPools.length + crossPools.length}`);
+    if (event.version === "v2") await processWetnV2Event(p, event);
+    else await processWetnV3Event(p, event);
   } catch (e) {
-    console.error("Check error:", e.message);
-  } finally {
-    checkAllSwapsRunning = false;
+    console.error(`Error ${p.symbol}:`, e.message);
+    throw e;
   }
+}
+
+async function processDecodedCross(log) {
+  const p = CROSS_POOL_BY_ADDR[log.address.toLowerCase()];
+  if (!p) return;
+  const event = decodeSwapLog(log);
+  try {
+    if (event.version === "v2") await processCrossV2Event(p, event);
+    else await processCrossV3Event(p, event);
+  } catch (e) {
+    console.error(`Error cross ${p.symbolA}/${p.symbolB}:`, e.message);
+    throw e;
+  }
+}
+
+async function scanRange(fromBlock, toBlock) {
+  const t0 = Date.now();
+  console.log(`Checking blocks ${fromBlock} to ${toBlock}`);
+  console.log(`[PERF] block=${toBlock} range=${fromBlock}-${toBlock} lag=${toBlock - fromBlock}`);
+
+  const twq = Date.now();
+  const wetnFetch = await fetchSwapLogs(WETN_POOL_ADDRS, fromBlock, toBlock);
+  const wetnLogs = wetnFetch.logs || [];
+  const wetnQueryMs = Date.now() - twq;
+
+  const twp = Date.now();
+  for (const log of wetnLogs) {
+    await processDecodedWetn(log);
+  }
+  const wetnProcessMs = Date.now() - twp;
+
+  const tcq = Date.now();
+  const crossFetch = await fetchSwapLogs(CROSS_POOL_ADDRS, fromBlock, toBlock);
+  const crossLogs = crossFetch.logs || [];
+  const crossQueryMs = Date.now() - tcq;
+
+  const tcp = Date.now();
+  for (const log of crossLogs) {
+    await processDecodedCross(log);
+  }
+  const crossProcessMs = Date.now() - tcp;
+
+  if (seenKeys.size > 5000) seenKeys.clear();
+  if (reclassifiedTxs.size > 2000) reclassifiedTxs.clear();
+
+  console.log(
+    `[PERF] checkAllSwaps=${Date.now() - t0}ms ` +
+    `wetnQuery=${wetnQueryMs}ms wetnEvents=${wetnLogs.length} wetnProcess=${wetnProcessMs}ms ` +
+    `crossQuery=${crossQueryMs}ms crossEvents=${crossLogs.length} crossProcess=${crossProcessMs}ms ` +
+    `pools=${wetnPools.length + crossPools.length}` +
+    ((!wetnFetch.ok || !crossFetch.ok) ? ` incomplete=1 wetnFail=${wetnFetch.failed || 0} crossFail=${crossFetch.failed || 0}` : "")
+  );
+
+  if (!wetnFetch.ok || !crossFetch.ok) {
+    throw new Error(
+      `incomplete log fetch wetnFail=${wetnFetch.failed || 0} crossFail=${crossFetch.failed || 0}`
+    );
+  }
+}
+
+async function runSchedulerLoop() {
+  if (schedulerRunning) return;
+  schedulerRunning = true;
+  try {
+    while (true) {
+      let head;
+      try {
+        head = await provider.getBlockNumber();
+        latestHead = head;
+      } catch (e) {
+        console.error("Head refresh failed:", e.message);
+        await sleep(POLL_HEAD_MS);
+        continue;
+      }
+      const fromBlock = lastBlock != null ? lastBlock + 1 : head - STARTUP_LOOKBACK_BLOCKS;
+      if (fromBlock > head) {
+        await sleep(POLL_HEAD_MS);
+        continue;
+      }
+      try {
+        await scanRange(fromBlock, head);
+        lastBlock = head;
+      } catch (e) {
+        console.error("Check error:", e.message);
+        console.log(`[PERF] scan failed; lastBlock stays ${lastBlock}; retry in ${SCAN_RETRY_MS}ms`);
+        await sleep(SCAN_RETRY_MS);
+      }
+    }
+  } finally {
+    schedulerRunning = false;
+  }
+}
+
+function scheduleTick() {
+  runSchedulerLoop().catch((e) => console.error("Scheduler error:", e.message));
 }
 
 async function start() {
@@ -1157,12 +1322,14 @@ async function start() {
   console.log("ETN price: CoinGecko → CoinPaprika → previous valid price (never on-chain pool)");
   console.log("FUGAZI support: enabled (V2 pool)");
   console.log("ENS: address → .etn via official Electroneum Registry + ReverseRegistrar");
+  console.log("Phase B scheduler: 1.5s head poll + sequential catch-up + batched getLogs");
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
-  setInterval(checkAllSwaps, 2000);
-  await checkAllSwaps();
+  setInterval(scheduleTick, POLL_HEAD_MS);
+  await runSchedulerLoop();
 }
+
 
 start();
 
