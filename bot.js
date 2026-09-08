@@ -14,6 +14,14 @@ const LIVE_TRADES_EXCLUDED_SYMBOLS = new Set(["CORE"]);
 
 const WETN_USDT_POOL = "0x0CC625331C9b22D94fEF29d462aB1c9B26dFF196";
 
+// Official Electroneum Name Service contracts
+// Source: https://github.com/electroneum/ens-contracts/tree/staging/deployments/electroneum
+const ENS_REGISTRY = "0x6f311f2212593165988dff84977e24c1005dbb85";
+const ENS_REVERSE_REGISTRAR = "0xfbb14edbd8d3f6e7bb240bfa388f6582df0d8e7a";
+const ENS_PUBLIC_RESOLVER = "0xdb4a3abb6703232e20a118a104e7f4ebb3e2738d";
+const ENS_NAME_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const ENS_RESOLVE_TIMEOUT_MS = 2500;
+
 const BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_buy.mp4";
 const CLUB_SELL_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/club_sell.mp4";
 const BOLT_BUY_GIF_URL = "https://raw.githubusercontent.com/Dejidanjuma/CLUB-TRACKER/main/bolt_buy.mp4";
@@ -104,12 +112,25 @@ const erc20Abi = [
   "function totalSupply() view returns (uint256)",
   "function balanceOf(address) view returns (uint256)"
 ];
+const ensRegistryAbi = [
+  "function resolver(bytes32 node) view returns (address)",
+  "function owner(bytes32 node) view returns (address)"
+];
+const ensReverseRegistrarAbi = [
+  "function node(address addr) pure returns (bytes32)"
+];
+const ensResolverAbi = [
+  "function name(bytes32 node) view returns (string)",
+  "function addr(bytes32 node) view returns (address)"
+];
 
 let etnPriceUsd = 0.00071;
 let lastBlock = null;
 const tokenDecimals = {};
 const seenKeys = new Set();
 const reclassifiedTxs = new Set();
+const walletNameCache = new Map();
+const ensInFlight = new Set();
 
 const supplyCache = new Map();
 const holdersCache = new Map();
@@ -120,6 +141,9 @@ const ADDR_TO_SYMBOL = {};
 for (const [sym, addr] of Object.entries(ADDR)) {
   ADDR_TO_SYMBOL[addr.toLowerCase()] = sym;
 }
+
+const ensRegistry = new ethers.Contract(ENS_REGISTRY, ensRegistryAbi, provider);
+const ensReverseRegistrar = new ethers.Contract(ENS_REVERSE_REGISTRAR, ensReverseRegistrarAbi, provider);
 
 function formatTokenAmount(num) {
   if (num == null || isNaN(num)) return "0";
@@ -159,6 +183,91 @@ function formatPosition(pct) {
   const abs = Math.abs(pct).toFixed(2);
   if (pct >= 0) return "📈 *Position:* +" + abs + "%";
   return "📉 *Position:* -" + abs + "%";
+}
+
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("ENS resolve timeout")), ms))
+  ]);
+}
+
+const ENS_ERROR_CACHE_TTL_MS = 60 * 1000;
+
+function cacheEtnName(walletLc, name, ttlMs = ENS_NAME_CACHE_TTL_MS) {
+  walletNameCache.set(walletLc, { name, ts: Date.now(), ttlMs });
+  if (walletNameCache.size > 5000) {
+    const now = Date.now();
+    for (const [k, v] of walletNameCache) {
+      const ttl = v.ttlMs || ENS_NAME_CACHE_TTL_MS;
+      if (now - v.ts > ttl) walletNameCache.delete(k);
+    }
+  }
+}
+
+async function resolveEtnName(wallet) {
+  if (!wallet) return null;
+  const walletLc = wallet.toLowerCase();
+  const cached = walletNameCache.get(walletLc);
+  if (cached && Date.now() - cached.ts < (cached.ttlMs || ENS_NAME_CACHE_TTL_MS)) {
+    return cached.name;
+  }
+
+  try {
+    const name = await withTimeout((async () => {
+      const reverseNode = await ensReverseRegistrar.node(walletLc);
+      const resolverAddr = await ensRegistry.resolver(reverseNode);
+      if (!resolverAddr || resolverAddr === ethers.ZeroAddress) {
+        return null;
+      }
+
+      const resolver = new ethers.Contract(resolverAddr, ensResolverAbi, provider);
+      let primary = await resolver.name(reverseNode);
+
+      if (!primary || typeof primary !== "string") return null;
+      primary = primary.trim().toLowerCase();
+      if (!primary.endsWith(".etn")) return null;
+
+      const fwdNode = ethers.namehash(primary);
+      const fwdResolverAddr = await ensRegistry.resolver(fwdNode);
+      if (!fwdResolverAddr || fwdResolverAddr === ethers.ZeroAddress) return null;
+      const fwdResolver = new ethers.Contract(fwdResolverAddr, ensResolverAbi, provider);
+      const fwdAddr = await fwdResolver.addr(fwdNode);
+      if (!fwdAddr || fwdAddr === ethers.ZeroAddress) return null;
+      if (fwdAddr.toLowerCase() !== walletLc) return null;
+
+      return primary;
+    })(), ENS_RESOLVE_TIMEOUT_MS);
+
+    cacheEtnName(walletLc, name || null, ENS_NAME_CACHE_TTL_MS);
+    return name || null;
+  } catch (e) {
+    console.error("ENS resolve failed:", e.message);
+    cacheEtnName(walletLc, null, ENS_ERROR_CACHE_TTL_MS);
+    return null;
+  }
+}
+
+function getCachedEtnName(wallet) {
+  if (!wallet) return null;
+  const walletLc = wallet.toLowerCase();
+  const cached = walletNameCache.get(walletLc);
+  if (cached && Date.now() - cached.ts < (cached.ttlMs || ENS_NAME_CACHE_TTL_MS)) {
+    return cached.name || null;
+  }
+  return null;
+}
+
+function prefetchEtnName(wallet) {
+  if (!wallet) return;
+  const walletLc = wallet.toLowerCase();
+  const cached = walletNameCache.get(walletLc);
+  if (cached && Date.now() - cached.ts < (cached.ttlMs || ENS_NAME_CACHE_TTL_MS)) return;
+  if (ensInFlight.has(walletLc)) return;
+  ensInFlight.add(walletLc);
+  resolveEtnName(wallet)
+    .catch((e) => console.error("ENS prefetch failed:", e.message))
+    .finally(() => ensInFlight.delete(walletLc));
 }
 
 async function getTotalSupply(tokenAddress, decimals) {
@@ -501,14 +610,21 @@ function walletLinkParts(wallet) {
   return { link, short };
 }
 
-function formatWetnMessage(symbol, isBuy, wetnAmount, tokenAmount, txHash, wallet, poolAddress, website, websiteLabel, enrichment) {
+function formatWalletField(roleLabel, wallet, etnName) {
+  const { link, short } = walletLinkParts(wallet);
+  if (etnName) {
+    return "👤 *" + roleLabel + ":* " + etnName + "\n[`" + short + "`](" + link + ")\n";
+  }
+  return "👤 *" + roleLabel + ":* [" + short + "](" + link + ")\n";
+}
+
+function formatWetnMessage(symbol, isBuy, wetnAmount, tokenAmount, txHash, wallet, poolAddress, website, websiteLabel, enrichment, etnName) {
   const usdValue = wetnAmount * etnPriceUsd;
   const tokenUsdPrice = enrichment?.tokenUsdPrice ?? (tokenAmount > 0 ? usdValue / tokenAmount : 0);
   const circles = buildCircles(isBuy, usdValue);
   const label = isBuy ? "BUY" : "SELL";
   const roleLabel = isBuy ? "Buyer" : "Seller";
   const txLink = "https://blockexplorer.electroneum.com/tx/" + txHash;
-  const { link: walletLink, short: walletShort } = walletLinkParts(wallet);
   const buyLink = `https://app.electroswap.io/swap?inputCurrency=${WETN}&outputCurrency=${ADDR[symbol]}`;
   const liveTxsLink = "https://blockexplorer.electroneum.com/address/" + poolAddress;
 
@@ -523,7 +639,7 @@ function formatWetnMessage(symbol, isBuy, wetnAmount, tokenAmount, txHash, walle
   }
 
   msg += "💵 *" + symbol + " Price:* " + formatTokenPrice(tokenUsdPrice) + "\n";
-  msg += "👤 *" + roleLabel + ":* [" + walletShort + "](" + walletLink + ")\n";
+  msg += formatWalletField(roleLabel, wallet, etnName);
   msg += "🔗 [View Transaction](" + txLink + ")\n";
 
   if (enrichment) {
@@ -546,9 +662,8 @@ function formatWetnMessage(symbol, isBuy, wetnAmount, tokenAmount, txHash, walle
   return msg;
 }
 
-function formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, txHash, wallet, poolAddress) {
+function formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, txHash, wallet, poolAddress, etnName) {
   const txLink = "https://blockexplorer.electroneum.com/tx/" + txHash;
-  const { link: walletLink, short: walletShort } = walletLinkParts(wallet);
   const liveTxsLink = "https://blockexplorer.electroneum.com/address/" + poolAddress;
   const tradeLink = `https://app.electroswap.io/swap?inputCurrency=${ADDR[symbolIn]}&outputCurrency=${ADDR[symbolOut]}`;
   let usdLine = "";
@@ -559,7 +674,7 @@ function formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, txHash, wa
     "💰 *Paid:* " + formatTokenAmount(amountIn) + " " + symbolIn + "\n" +
     "🔢 *Received:* " + formatTokenAmount(amountOut) + " " + symbolOut + "\n" +
     usdLine +
-    "👤 *Trader:* [" + walletShort + "](" + walletLink + ")\n" +
+    formatWalletField("Trader", wallet, etnName) +
     "🔗 [View Transaction](" + txLink + ")\n\n" +
     "━━━━━━━━━━━━━━━━━━━━━━\n\n" +
     "🔄 [Trade " + symbolIn + "→" + symbolOut + "](" + tradeLink + ") | ⚡ [Live Txs](" + liveTxsLink + ")";
@@ -653,6 +768,18 @@ function makeKey(txHash, logIndex) {
   return txHash + "-" + logIndex;
 }
 
+function claimSeen(key) {
+  if (seenKeys.has(key)) return false;
+  seenKeys.add(key);
+  return true;
+}
+
+function claimReclassified(txHash) {
+  if (reclassifiedTxs.has(txHash)) return false;
+  reclassifiedTxs.add(txHash);
+  return true;
+}
+
 const CIRCLE_MIN = 1;
 const CIRCLE_MAX = 50;
 const CIRCLE_BASE = 0.08;
@@ -682,7 +809,7 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
 
   for (const event of events) {
     const key = makeKey(event.transactionHash, event.logIndex);
-    if (seenKeys.has(key)) continue;
+    if (!claimSeen(key)) continue;
 
     const a0In = event.args[1], a1In = event.args[2], a0Out = event.args[3], a1Out = event.args[4];
     let isBuy, wetnAmount, tokenAmountFromSwap;
@@ -716,10 +843,7 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
     const ins  = flows.filter(f => f.direction === "in");
 
     if (outs.length === 1 && ins.length === 1) {
-      if (reclassifiedTxs.has(event.transactionHash)) {
-        seenKeys.add(key);
-        continue;
-      }
+      if (!claimReclassified(event.transactionHash)) continue;
 
       const outFlow = outs[0];
       const inFlow  = ins[0];
@@ -728,10 +852,9 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
       const symbolOut = inFlow.symbol;
       const amountOut = inFlow.amount;
 
-      reclassifiedTxs.add(event.transactionHash);
-      seenKeys.add(key);
-
-      const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
+      const etnName = getCachedEtnName(wallet);
+      prefetchEtnName(wallet);
+      const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool, etnName);
       const gifUrl = pickCrossGif(symbolIn, symbolOut);
       await sendMessageWithOptionalGif(message, gifUrl, 0);
       console.log(`✅ Sent multi-hop ${symbolIn}→${symbolOut} (reclassified from ${p.symbol} WETN leg) [v2]`);
@@ -755,7 +878,9 @@ async function checkWetnPoolV2(p, fromBlock, toBlock) {
 
     seenKeys.add(key);
 
-    const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel, enrichment);
+    const etnName = getCachedEtnName(wallet);
+    prefetchEtnName(wallet);
+    const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel, enrichment, etnName);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
     await sendMessageWithOptionalGif(message, gifUrl, usdValue, p.symbol);
     console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} | Amount: ${formatTokenAmount(tokenAmount)} [v2]`);
@@ -769,7 +894,7 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
 
   for (const event of events) {
     const key = makeKey(event.transactionHash, event.logIndex);
-    if (seenKeys.has(key)) continue;
+    if (!claimSeen(key)) continue;
 
     const amount0 = event.args[2];
     const amount1 = event.args[3];
@@ -799,10 +924,7 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
     const ins  = flows.filter(f => f.direction === "in");
 
     if (outs.length === 1 && ins.length === 1) {
-      if (reclassifiedTxs.has(event.transactionHash)) {
-        seenKeys.add(key);
-        continue;
-      }
+      if (!claimReclassified(event.transactionHash)) continue;
 
       const outFlow = outs[0];
       const inFlow  = ins[0];
@@ -811,10 +933,9 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
       const symbolOut = inFlow.symbol;
       const amountOut = inFlow.amount;
 
-      reclassifiedTxs.add(event.transactionHash);
-      seenKeys.add(key);
-
-      const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
+      const etnName = getCachedEtnName(wallet);
+      prefetchEtnName(wallet);
+      const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool, etnName);
       const gifUrl = pickCrossGif(symbolIn, symbolOut);
       await sendMessageWithOptionalGif(message, gifUrl, 0);
       console.log(`✅ Sent multi-hop ${symbolIn}→${symbolOut} (reclassified from ${p.symbol} WETN leg) [v3]`);
@@ -838,7 +959,9 @@ async function checkWetnPoolV3(p, fromBlock, toBlock) {
 
     seenKeys.add(key);
 
-    const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel, enrichment);
+    const etnName = getCachedEtnName(wallet);
+    prefetchEtnName(wallet);
+    const message = formatWetnMessage(p.symbol, isBuy, wetnAmount, tokenAmount, event.transactionHash, wallet, p.pool, p.website, p.websiteLabel, enrichment, etnName);
     const gifUrl = pickWetnGif(p.symbol, isBuy);
     await sendMessageWithOptionalGif(message, gifUrl, usdValue, p.symbol);
     console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} | Amount: ${formatTokenAmount(tokenAmount)} [v3]`);
@@ -853,12 +976,9 @@ async function checkCrossPoolV2(p, fromBlock, toBlock) {
 
   for (const event of events) {
     const key = makeKey(event.transactionHash, event.logIndex);
-    if (seenKeys.has(key)) continue;
+    if (!claimSeen(key)) continue;
 
-    if (reclassifiedTxs.has(event.transactionHash)) {
-      seenKeys.add(key);
-      continue;
-    }
+    if (reclassifiedTxs.has(event.transactionHash)) continue;
 
     const a0In = event.args[1], a1In = event.args[2], a0Out = event.args[3], a1Out = event.args[4];
     let symbolIn, symbolOut, amountIn, amountOut;
@@ -898,7 +1018,9 @@ async function checkCrossPoolV2(p, fromBlock, toBlock) {
 
     seenKeys.add(key);
 
-    const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
+    const etnName = getCachedEtnName(wallet);
+    prefetchEtnName(wallet);
+    const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool, etnName);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
     await sendMessageWithOptionalGif(message, gifUrl, usdValue);
     console.log(`✅ Sent cross ${symbolIn}→${symbolOut}`);
@@ -913,12 +1035,9 @@ async function checkCrossPoolV3(p, fromBlock, toBlock) {
 
   for (const event of events) {
     const key = makeKey(event.transactionHash, event.logIndex);
-    if (seenKeys.has(key)) continue;
+    if (!claimSeen(key)) continue;
 
-    if (reclassifiedTxs.has(event.transactionHash)) {
-      seenKeys.add(key);
-      continue;
-    }
+    if (reclassifiedTxs.has(event.transactionHash)) continue;
 
     const amount0 = event.args[2];
     const amount1 = event.args[3];
@@ -950,43 +1069,79 @@ async function checkCrossPoolV3(p, fromBlock, toBlock) {
 
     seenKeys.add(key);
 
-    const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool);
+    const etnName = getCachedEtnName(wallet);
+    prefetchEtnName(wallet);
+    const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool, etnName);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
     await sendMessageWithOptionalGif(message, gifUrl, usdValue);
     console.log(`✅ Sent cross ${symbolIn}→${symbolOut}`);
   }
 }
 
+const POOL_CONCURRENCY = 6;
+let checkAllSwapsRunning = false;
+
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function runOne() {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= items.length) return;
+      results[i] = await worker(items[i], i);
+    }
+  }
+  const runners = [];
+  const n = Math.min(limit, items.length);
+  for (let i = 0; i < n; i++) runners.push(runOne());
+  await Promise.all(runners);
+  return results;
+}
+
 async function checkAllSwaps() {
+  if (checkAllSwapsRunning) {
+    console.log("[PERF] skipped overlapping checkAllSwaps");
+    return;
+  }
+  checkAllSwapsRunning = true;
+  const t0 = Date.now();
   try {
     const currentBlock = await provider.getBlockNumber();
     const fromBlock = lastBlock ? lastBlock + 1 : currentBlock - 200;
     if (fromBlock > currentBlock) return;
     console.log(`Checking blocks ${fromBlock} to ${currentBlock}`);
+    console.log(`[PERF] block=${currentBlock} range=${fromBlock}-${currentBlock}`);
 
-    for (const p of wetnPools) {
+    const tw = Date.now();
+    await mapWithConcurrency(wetnPools, POOL_CONCURRENCY, async (p) => {
       try {
         if (p.version === "v2") await checkWetnPoolV2(p, fromBlock, currentBlock);
         else await checkWetnPoolV3(p, fromBlock, currentBlock);
       } catch (e) {
         console.error(`Error ${p.symbol}:`, e.message);
       }
-    }
+    });
+    const wetnMs = Date.now() - tw;
 
-    for (const p of crossPools) {
+    const tc = Date.now();
+    await mapWithConcurrency(crossPools, POOL_CONCURRENCY, async (p) => {
       try {
         if (p.version === "v2") await checkCrossPoolV2(p, fromBlock, currentBlock);
         else await checkCrossPoolV3(p, fromBlock, currentBlock);
       } catch (e) {
         console.error(`Error cross ${p.symbolA}/${p.symbolB}:`, e.message);
       }
-    }
+    });
+    const crossMs = Date.now() - tc;
 
     lastBlock = currentBlock;
     if (seenKeys.size > 5000) seenKeys.clear();
     if (reclassifiedTxs.size > 2000) reclassifiedTxs.clear();
+    console.log(`[PERF] checkAllSwaps=${Date.now() - t0}ms wetnScan=${wetnMs}ms crossScan=${crossMs}ms pools=${wetnPools.length + crossPools.length}`);
   } catch (e) {
     console.error("Check error:", e.message);
+  } finally {
+    checkAllSwapsRunning = false;
   }
 }
 
@@ -1001,10 +1156,11 @@ async function start() {
   console.log("Enrichment: historical Position (block-1) + Market Cap + Holders");
   console.log("ETN price: CoinGecko → CoinPaprika → previous valid price (never on-chain pool)");
   console.log("FUGAZI support: enabled (V2 pool)");
+  console.log("ENS: address → .etn via official Electroneum Registry + ReverseRegistrar");
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
-  setInterval(checkAllSwaps, 12000);
+  setInterval(checkAllSwaps, 2000);
   await checkAllSwaps();
 }
 
