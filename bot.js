@@ -1,6 +1,8 @@
 const { ethers } = require("ethers");
 const TelegramBot = require("node-telegram-bot-api").TelegramBot;
 const http = require("http");
+const fs = require("fs");
+const path = require("path");
 
 const RPC = "https://rpc.ankr.com/electroneum";
 const WETN = "0x138DAFbDA0CCB3d8E39C19edb0510Fc31b7C1c77";
@@ -11,6 +13,22 @@ const CLUB_GROUP_CHAT_ID = process.env.CLUB_GROUP_CHAT_ID || "-1002386155004";
 const LIVE_TRADES_TOPIC_ID = 55341;
 const BLOCKSCOUT_BASE = "https://blockexplorer.electroneum.com/api/v2";
 const LIVE_TRADES_EXCLUDED_SYMBOLS = new Set(["CORE"]);
+
+function resolveDedupeStatePath() {
+  if (process.env.DEDUPE_STATE_PATH) return process.env.DEDUPE_STATE_PATH;
+  const candidates = [];
+  if (process.env.RENDER_DISK_PATH) {
+    candidates.push(path.join(process.env.RENDER_DISK_PATH, "dedupe-state.json"));
+  }
+  candidates.push("/var/data/dedupe-state.json", "/data/dedupe-state.json");
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(path.dirname(p))) return p;
+    } catch (_) {}
+  }
+  return path.join(__dirname, "dedupe-state.json");
+}
+const DEDUPE_STATE_PATH = resolveDedupeStatePath();
 
 const WETN_USDT_POOL = "0x0CC625331C9b22D94fEF29d462aB1c9B26dFF196";
 
@@ -805,25 +823,69 @@ function formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, txHash, wa
     "🔄 [Trade " + symbolIn + "→" + symbolOut + "](" + tradeLink + ") | ⚡ [Live Txs](" + liveTxsLink + ")";
 }
 
-async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0, symbol = null) {
-  const opts = { parse_mode: "Markdown", disable_web_page_preview: true };
+function telegramStatusCode(err) {
+  if (!err) return 0;
+  if (err.response && err.response.statusCode) return Number(err.response.statusCode);
+  if (typeof err.code === "number") return err.code;
+  return 0;
+}
 
+function isUncertainTelegramDelivery(err) {
+  const code = telegramStatusCode(err);
+  const msg = String(err && err.message ? err.message : "").toLowerCase();
+  if (code === 429 || code >= 500) return true;
+  if (/timeout|timed out|econnreset|econnrefused|socket hang|network|etimedout|enotfound|eai_again|fetch failed/.test(msg)) return true;
+  return false;
+}
+
+function isSafeAnimationFallback(err) {
+  const code = telegramStatusCode(err);
+  const msg = String(err && err.message ? err.message : "").toLowerCase();
+  if (code === 400) return true;
+  if (/bad request|wrong file identifier|failed to get http url|failed to send|can't parse|caption is too long|unsupported/.test(msg)) return true;
+  return false;
+}
+
+async function sendTelegramPayload(chatId, message, gifUrl, extra) {
+  const opts = Object.assign({
+    parse_mode: "Markdown",
+    disable_web_page_preview: true
+  }, extra || {});
   try {
     if (gifUrl) {
-      await bot.sendAnimation(CHAT_ID, gifUrl, {
+      await bot.sendAnimation(chatId, gifUrl, Object.assign({
         caption: message,
         parse_mode: "Markdown"
-      });
+      }, extra || {}));
     } else {
-      await bot.sendMessage(CHAT_ID, message, opts);
+      await bot.sendMessage(chatId, message, opts);
     }
+    return "sent";
   } catch (err) {
-    console.error("Send failed to main group:", err.message);
-    try {
-      await bot.sendMessage(CHAT_ID, message, opts);
-    } catch (e) {
-      throw new Error("Telegram main send failed: " + (e.message || err.message));
+    if (isUncertainTelegramDelivery(err)) {
+      console.error("Telegram uncertain delivery, skipping retry:", err.message);
+      return "uncertain";
     }
+    if (gifUrl && isSafeAnimationFallback(err)) {
+      try {
+        await bot.sendMessage(chatId, message, opts);
+        return "sent";
+      } catch (e) {
+        if (isUncertainTelegramDelivery(e)) {
+          console.error("Telegram text fallback uncertain, skipping retry:", e.message);
+          return "uncertain";
+        }
+        throw e;
+      }
+    }
+    throw err;
+  }
+}
+
+async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0, symbol = null) {
+  const mainResult = await sendTelegramPayload(CHAT_ID, message, gifUrl);
+  if (mainResult !== "sent" && mainResult !== "uncertain") {
+    throw new Error("Telegram main send failed");
   }
 
   const isTokenToToken = symbol === null;
@@ -832,27 +894,12 @@ async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0, symbol 
     (usdValue >= 5 && symbol && !LIVE_TRADES_EXCLUDED_SYMBOLS.has(symbol));
 
   if (qualifiesForLive) {
-    const topicOpts = {
-      parse_mode: "Markdown",
-      disable_web_page_preview: true,
-      message_thread_id: LIVE_TRADES_TOPIC_ID
-    };
-
     try {
-      if (gifUrl) {
-        await bot.sendAnimation(CLUB_GROUP_CHAT_ID, gifUrl, {
-          caption: message,
-          parse_mode: "Markdown",
-          message_thread_id: LIVE_TRADES_TOPIC_ID
-        });
-      } else {
-        await bot.sendMessage(CLUB_GROUP_CHAT_ID, message, topicOpts);
-      }
+      await sendTelegramPayload(CLUB_GROUP_CHAT_ID, message, gifUrl, {
+        message_thread_id: LIVE_TRADES_TOPIC_ID
+      });
     } catch (err) {
       console.error("Send failed to LIVE TRADES topic:", err.message);
-      try {
-        await bot.sendMessage(CLUB_GROUP_CHAT_ID, message, topicOpts);
-      } catch (e) {}
     }
   }
 }
@@ -895,24 +942,122 @@ function makeKey(txHash, logIndex) {
   return txHash + "-" + logIndex;
 }
 
+let persistInFlight = false;
+let persistQueued = false;
+let shuttingDown = false;
+
+function buildDedupePayload() {
+  return JSON.stringify({
+    seen: Array.from(seenKeys),
+    reclass: Array.from(reclassifiedTxs),
+    lastBlock
+  });
+}
+
+function persistDedupeStateSync() {
+  const dir = path.dirname(DEDUPE_STATE_PATH);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmp = DEDUPE_STATE_PATH + ".tmp." + process.pid;
+  fs.writeFileSync(tmp, buildDedupePayload());
+  fs.renameSync(tmp, DEDUPE_STATE_PATH);
+}
+
+async function persistDedupeStateAtomic() {
+  const dir = path.dirname(DEDUPE_STATE_PATH);
+  await fs.promises.mkdir(dir, { recursive: true });
+  const tmp = DEDUPE_STATE_PATH + ".tmp." + process.pid;
+  await fs.promises.writeFile(tmp, buildDedupePayload());
+  await fs.promises.rename(tmp, DEDUPE_STATE_PATH);
+}
+
+function schedulePersist() {
+  persistQueued = true;
+  if (persistInFlight || shuttingDown) return;
+  persistInFlight = true;
+  persistQueued = false;
+  persistDedupeStateAtomic().catch((e) => {
+    console.error("Dedupe persist failed:", e.message);
+  }).finally(() => {
+    persistInFlight = false;
+    if (persistQueued && !shuttingDown) schedulePersist();
+  });
+}
+
+function loadDedupeState() {
+  try {
+    const raw = fs.readFileSync(DEDUPE_STATE_PATH, "utf8");
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch (parseErr) {
+      console.error("⚠️ DEDUPE STATE CORRUPTED at " + DEDUPE_STATE_PATH);
+      console.error("⚠️ JSON parse failed: " + parseErr.message);
+      console.error("⚠️ Duplicate-alert risk exists. Not treating this as a clean missing-state start.");
+      data = null;
+    }
+    if (data) {
+      if (Array.isArray(data.seen)) {
+        for (const k of data.seen) seenKeys.add(k);
+      }
+      if (Array.isArray(data.reclass)) {
+        for (const k of data.reclass) reclassifiedTxs.add(k);
+      }
+      if (typeof data.lastBlock === "number" && data.lastBlock > 0) {
+        lastBlock = data.lastBlock;
+      }
+      console.log(`Dedupe loaded: seen=${seenKeys.size} reclass=${reclassifiedTxs.size} lastBlock=${lastBlock}`);
+    }
+  } catch (e) {
+    if (e.code === "ENOENT") console.log("Dedupe: no prior state file at " + DEDUPE_STATE_PATH);
+    else console.error("Dedupe load failed:", e.message);
+  }
+  if (lastBlock == null && process.env.DEDUPE_LAST_BLOCK) {
+    const boot = Number(process.env.DEDUPE_LAST_BLOCK);
+    if (Number.isFinite(boot) && boot > 0) {
+      lastBlock = boot;
+      console.log("Dedupe bootstrap lastBlock from DEDUPE_LAST_BLOCK=" + boot);
+    }
+  }
+}
+
+function handleShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log("Received " + signal + ", persisting dedupe state...");
+  try {
+    persistDedupeStateSync();
+    console.log("Dedupe state saved to " + DEDUPE_STATE_PATH);
+  } catch (e) {
+    console.error("Dedupe shutdown persist failed:", e.message);
+  }
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => handleShutdown("SIGTERM"));
+process.on("SIGINT", () => handleShutdown("SIGINT"));
+
 function claimSeen(key) {
   if (seenKeys.has(key)) return false;
   seenKeys.add(key);
+  schedulePersist();
   return true;
 }
 
 function releaseSeen(key) {
   seenKeys.delete(key);
+  schedulePersist();
 }
 
 function claimReclassified(txHash) {
   if (reclassifiedTxs.has(txHash)) return false;
   reclassifiedTxs.add(txHash);
+  schedulePersist();
   return true;
 }
 
 function releaseReclassified(txHash) {
   reclassifiedTxs.delete(txHash);
+  schedulePersist();
 }
 
 function failRetryableEvent(key, reason, txHash = null, reclassClaimed = false) {
@@ -1408,6 +1553,7 @@ async function runSchedulerLoop() {
       try {
         await scanRange(fromBlock, head);
         lastBlock = head;
+        schedulePersist();
       } catch (e) {
         console.error("Check error:", e.message);
         console.log(`[PERF] scan failed; lastBlock stays ${lastBlock}; retry in ${SCAN_RETRY_MS}ms`);
@@ -1436,6 +1582,8 @@ async function start() {
   console.log("FUGAZI support: enabled (V2 pool)");
   console.log("ENS: verified primary, else UR ReverseAddressMismatch name if forward addr matches wallet");
   console.log("Phase B scheduler: 1.5s head poll + sequential catch-up + batched getLogs");
+  console.log("Dedupe persist: async file " + DEDUPE_STATE_PATH + " (set DEDUPE_STATE_PATH or mount /var/data for deploy-safe state)");
+  loadDedupeState();
   await loadDecimals();
   await updatePrice();
   setInterval(updatePrice, 120000);
