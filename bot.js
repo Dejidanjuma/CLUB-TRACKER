@@ -156,6 +156,7 @@ let lastBlock = null;
 const tokenDecimals = {};
 const seenKeys = new Set();
 const reclassifiedTxs = new Set();
+const userFacingTrades = new Set();
 const walletNameCache = new Map();
 const ensInFlight = new Set();
 
@@ -1060,10 +1061,22 @@ function releaseReclassified(txHash) {
   schedulePersist();
 }
 
-function failRetryableEvent(key, reason, txHash = null, reclassClaimed = false) {
+function failRetryableEvent(key, reason, txHash = null, reclassClaimed = false, faceKey = null) {
   releaseSeen(key);
   if (reclassClaimed && txHash) releaseReclassified(txHash);
+  if (faceKey) userFacingTrades.delete(faceKey);
   throw new Error(reason);
+}
+
+function makeUserFacingKey(txHash, wallet, symbol, isBuy, tokenAmount) {
+  const amt = Number(tokenAmount).toFixed(6);
+  return String(txHash).toLowerCase() + "|" + String(wallet).toLowerCase() + "|" + symbol + "|" + (isBuy ? "BUY" : "SELL") + "|" + amt;
+}
+
+function claimUserFacing(faceKey) {
+  if (userFacingTrades.has(faceKey)) return false;
+  userFacingTrades.add(faceKey);
+  return true;
 }
 
 const CIRCLE_MIN = 1;
@@ -1194,6 +1207,10 @@ async function processWetnV2Event(p, event) {
       console.log(`⏭️ Skipped ${p.symbol} ${isBuy ? "BUY" : "SELL"} (intermediate hop) [v2]`);
       return;
     }
+    if (reclassifiedTxs.has(event.transactionHash)) {
+      console.log(`⏭️ Duplicate user-facing WETN alert suppressed tx=${event.transactionHash} trader=${wallet} token=${p.symbol} dir=${isBuy ? "BUY" : "SELL"} pool=v2 reason=already-classified-TOKEN-to-TOKEN`);
+      return;
+    }
 
     const receipt = await getReceipt(event.transactionHash);
     if (!receipt) failRetryableEvent(key, "receipt unavailable " + event.transactionHash.slice(0, 10));
@@ -1230,6 +1247,14 @@ async function processWetnV2Event(p, event) {
     const usdValue = wetnAmount * etnPriceUsd;
     const tokenUsdPrice = tokenAmount > 0 ? usdValue / tokenAmount : 0;
 
+    const faceKey = makeUserFacingKey(event.transactionHash, wallet, p.symbol, isBuy, tokenAmount);
+    if (!claimUserFacing(faceKey)) {
+      console.log(
+        `⏭️ Duplicate user-facing WETN alert suppressed tx=${event.transactionHash} trader=${wallet} token=${p.symbol} dir=${isBuy ? "BUY" : "SELL"} amount=${formatTokenAmount(tokenAmount)} pool=v2 reason=same-tx same-trader same-token same-direction same-amount`
+      );
+      return;
+    }
+
     let enrichment = null;
     try {
       enrichment = await getEnrichment(
@@ -1249,7 +1274,7 @@ async function processWetnV2Event(p, event) {
     try {
       await sendMessageWithOptionalGif(message, gifUrl, usdValue, p.symbol);
     } catch (e) {
-      failRetryableEvent(key, e.message);
+      failRetryableEvent(key, e.message, null, false, faceKey);
     }
     console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} | Amount: ${formatTokenAmount(tokenAmount)} [v2]`);
 }
@@ -1278,6 +1303,10 @@ async function processWetnV3Event(p, event) {
     if (genuine == null) failRetryableEvent(key, "genuine-leg receipt unavailable " + event.transactionHash.slice(0, 10));
     if (!genuine) {
       console.log(`⏭️ Skipped ${p.symbol} ${isBuy ? "BUY" : "SELL"} (intermediate hop) [v3]`);
+      return;
+    }
+    if (reclassifiedTxs.has(event.transactionHash)) {
+      console.log(`⏭️ Duplicate user-facing WETN alert suppressed tx=${event.transactionHash} trader=${wallet} token=${p.symbol} dir=${isBuy ? "BUY" : "SELL"} pool=v3 reason=already-classified-TOKEN-to-TOKEN`);
       return;
     }
 
@@ -1316,6 +1345,14 @@ async function processWetnV3Event(p, event) {
     const usdValue = wetnAmount * etnPriceUsd;
     const tokenUsdPrice = tokenAmount > 0 ? usdValue / tokenAmount : 0;
 
+    const faceKey = makeUserFacingKey(event.transactionHash, wallet, p.symbol, isBuy, tokenAmount);
+    if (!claimUserFacing(faceKey)) {
+      console.log(
+        `⏭️ Duplicate user-facing WETN alert suppressed tx=${event.transactionHash} trader=${wallet} token=${p.symbol} dir=${isBuy ? "BUY" : "SELL"} amount=${formatTokenAmount(tokenAmount)} pool=v3 reason=same-tx same-trader same-token same-direction same-amount`
+      );
+      return;
+    }
+
     let enrichment = null;
     try {
       enrichment = await getEnrichment(
@@ -1335,7 +1372,7 @@ async function processWetnV3Event(p, event) {
     try {
       await sendMessageWithOptionalGif(message, gifUrl, usdValue, p.symbol);
     } catch (e) {
-      failRetryableEvent(key, e.message);
+      failRetryableEvent(key, e.message, null, false, faceKey);
     }
     console.log(`✅ Sent ${p.symbol} ${isBuy ? "BUY" : "SELL"} $${usdValue.toFixed(2)} | Amount: ${formatTokenAmount(tokenAmount)} [v3]`);
 }
@@ -1515,6 +1552,7 @@ async function scanRange(fromBlock, toBlock) {
 
   if (seenKeys.size > 5000) seenKeys.clear();
   if (reclassifiedTxs.size > 2000) reclassifiedTxs.clear();
+  if (userFacingTrades.size > 2000) userFacingTrades.clear();
 
   console.log(
     `[PERF] checkAllSwaps=${Date.now() - t0}ms ` +
