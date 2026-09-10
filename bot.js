@@ -13,6 +13,7 @@ const CLUB_GROUP_CHAT_ID = process.env.CLUB_GROUP_CHAT_ID || "-1002386155004";
 const LIVE_TRADES_TOPIC_ID = 55341;
 const BLOCKSCOUT_BASE = "https://blockexplorer.electroneum.com/api/v2";
 const LIVE_TRADES_EXCLUDED_SYMBOLS = new Set(["CORE"]);
+const LIVE_TRADES_EXCLUDED_PAIRS = new Set(["CLUB|CORE", "CORE|CLUB"]);
 
 function resolveDedupeStatePath() {
   if (process.env.DEDUPE_STATE_PATH) return process.env.DEDUPE_STATE_PATH;
@@ -883,16 +884,20 @@ async function sendTelegramPayload(chatId, message, gifUrl, extra) {
   }
 }
 
-async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0, symbol = null) {
+async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0, symbol = null, pairSymbols = null) {
   const mainResult = await sendTelegramPayload(CHAT_ID, message, gifUrl);
   if (mainResult !== "sent" && mainResult !== "uncertain") {
     throw new Error("Telegram main send failed");
   }
 
   const isTokenToToken = symbol === null;
+  const pairKey = pairSymbols && pairSymbols[0] && pairSymbols[1]
+    ? (pairSymbols[0] + "|" + pairSymbols[1])
+    : null;
+  const excludedPair = pairKey && LIVE_TRADES_EXCLUDED_PAIRS.has(pairKey);
   const qualifiesForLive =
-    isTokenToToken ||
-    (usdValue >= 5 && symbol && !LIVE_TRADES_EXCLUDED_SYMBOLS.has(symbol));
+    (isTokenToToken && !excludedPair) ||
+    (!isTokenToToken && usdValue >= 5 && symbol && !LIVE_TRADES_EXCLUDED_SYMBOLS.has(symbol));
 
   if (qualifiesForLive) {
     try {
@@ -1234,7 +1239,7 @@ async function processWetnV2Event(p, event) {
       const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool, etnName);
       const gifUrl = pickCrossGif(symbolIn, symbolOut);
       try {
-        await sendMessageWithOptionalGif(message, gifUrl, 0);
+        await sendMessageWithOptionalGif(message, gifUrl, 0, null, [symbolIn, symbolOut]);
       } catch (e) {
         failRetryableEvent(key, e.message, event.transactionHash, true);
       }
@@ -1332,7 +1337,7 @@ async function processWetnV3Event(p, event) {
       const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool, etnName);
       const gifUrl = pickCrossGif(symbolIn, symbolOut);
       try {
-        await sendMessageWithOptionalGif(message, gifUrl, 0);
+        await sendMessageWithOptionalGif(message, gifUrl, 0, null, [symbolIn, symbolOut]);
       } catch (e) {
         failRetryableEvent(key, e.message, event.transactionHash, true);
       }
@@ -1429,7 +1434,7 @@ async function processCrossV2Event(p, event) {
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool, etnName);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
     try {
-      await sendMessageWithOptionalGif(message, gifUrl, usdValue);
+      await sendMessageWithOptionalGif(message, gifUrl, usdValue, null, [symbolIn, symbolOut]);
     } catch (e) {
       failRetryableEvent(key, e.message);
     }
@@ -1480,7 +1485,7 @@ async function processCrossV3Event(p, event) {
     const message = formatCrossMessage(symbolIn, amountIn, symbolOut, amountOut, event.transactionHash, wallet, p.pool, etnName);
     const gifUrl = pickCrossGif(symbolIn, symbolOut);
     try {
-      await sendMessageWithOptionalGif(message, gifUrl, usdValue);
+      await sendMessageWithOptionalGif(message, gifUrl, usdValue, null, [symbolIn, symbolOut]);
     } catch (e) {
       failRetryableEvent(key, e.message);
     }
@@ -1613,7 +1618,7 @@ async function start() {
   console.log(`Main group: ${CHAT_ID}`);
   console.log(`CLUB group: ${CLUB_GROUP_CHAT_ID} → LIVE TRADES topic (${LIVE_TRADES_TOPIC_ID})`);
   console.log(`  - WETN trades: ≥ $5 (CORE excluded)`);
-  console.log(`  - TOKEN→TOKEN swaps: always sent to LIVE TRADES`);
+  console.log(`  - TOKEN→TOKEN swaps: LIVE TRADES except CLUB↔CORE`);
   console.log(`Router: ${ROUTER_ADDRESS}`);
   console.log("Enrichment: historical Position (block-1) + Market Cap + Holders");
   console.log("ETN price: CoinGecko → CoinPaprika → previous valid price (never on-chain pool)");
