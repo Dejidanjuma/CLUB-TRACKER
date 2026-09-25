@@ -14,6 +14,9 @@ const LIVE_TRADES_TOPIC_ID = 55341;
 const BLOCKSCOUT_BASE = "https://blockexplorer.electroneum.com/api/v2";
 const LIVE_TRADES_EXCLUDED_SYMBOLS = new Set(["CORE"]);
 const LIVE_TRADES_EXCLUDED_PAIRS = new Set(["CLUB|CORE", "CORE|CLUB"]);
+const LIVE_TRADES_THRESHOLD_USD = 5;
+const LIVE_TRADES_STABLECOIN_THRESHOLD_USD = 500;
+const LIVE_TRADES_STABLECOIN_SYMBOLS = new Set(["USDC", "USDT"]);
 
 function resolveDedupeStatePath() {
   if (process.env.DEDUPE_STATE_PATH) return process.env.DEDUPE_STATE_PATH;
@@ -895,9 +898,12 @@ async function sendMessageWithOptionalGif(message, gifUrl, usdValue = 0, symbol 
     ? (pairSymbols[0] + "|" + pairSymbols[1])
     : null;
   const excludedPair = pairKey && LIVE_TRADES_EXCLUDED_PAIRS.has(pairKey);
+  const wetnLiveThreshold = LIVE_TRADES_STABLECOIN_SYMBOLS.has(symbol)
+    ? LIVE_TRADES_STABLECOIN_THRESHOLD_USD
+    : LIVE_TRADES_THRESHOLD_USD;
   const qualifiesForLive =
     (isTokenToToken && !excludedPair) ||
-    (!isTokenToToken && usdValue >= 5 && symbol && !LIVE_TRADES_EXCLUDED_SYMBOLS.has(symbol));
+    (!isTokenToToken && usdValue >= wetnLiveThreshold && symbol && !LIVE_TRADES_EXCLUDED_SYMBOLS.has(symbol));
 
   if (qualifiesForLive) {
     try {
@@ -1084,6 +1090,33 @@ function claimUserFacing(faceKey) {
   return true;
 }
 
+function txHasUserFacingWetn(txHash, wallet, symbol) {
+  if (!txHash || !wallet || !symbol) return false;
+  const prefix = String(txHash).toLowerCase() + "|" + String(wallet).toLowerCase() + "|" + symbol + "|";
+  for (const k of userFacingTrades) {
+    if (k.startsWith(prefix)) return true;
+  }
+  return false;
+}
+
+function traderHasWetnLeg(receipt, wallet) {
+  if (!receipt || !wallet) return false;
+  if (transferInvolvesWallet(receipt, WETN, wallet, "from")) return true;
+  if (transferInvolvesWallet(receipt, WETN, wallet, "to")) return true;
+  const walletLc = wallet.toLowerCase();
+  for (const log of receipt.logs) {
+    if (log.address.toLowerCase() !== WETN.toLowerCase()) continue;
+    if (log.topics[0] === WETN_DEPOSIT_TOPIC || log.topics[0] === WETN_WITHDRAWAL_TOPIC) {
+      if (log.topics[1] && ("0x" + log.topics[1].slice(26).toLowerCase()) === walletLc) return true;
+    }
+  }
+  return false;
+}
+
+function isInternalRoutingPair(txHash, wallet, symbolIn, symbolOut) {
+  return txHasUserFacingWetn(txHash, wallet, symbolIn) || txHasUserFacingWetn(txHash, wallet, symbolOut);
+}
+
 const CIRCLE_MIN = 1;
 const CIRCLE_MAX = 50;
 const CIRCLE_BASE = 0.08;
@@ -1224,7 +1257,7 @@ async function processWetnV2Event(p, event) {
     const outs = flows.filter(f => f.direction === "out");
     const ins  = flows.filter(f => f.direction === "in");
 
-    if (outs.length === 1 && ins.length === 1) {
+    if (outs.length === 1 && ins.length === 1 && !traderHasWetnLeg(receipt, wallet)) {
       if (!claimReclassified(event.transactionHash)) return;
 
       const outFlow = outs[0];
@@ -1245,6 +1278,9 @@ async function processWetnV2Event(p, event) {
       }
       console.log(`✅ Sent multi-hop ${symbolIn}→${symbolOut} (reclassified from ${p.symbol} WETN leg) [v2]`);
       return;
+    }
+    if (outs.length === 1 && ins.length === 1 && traderHasWetnLeg(receipt, wallet)) {
+      console.log(`⏭️ Internal routing token→token suppressed tx=${event.transactionHash} ${outs[0].symbol}→${ins[0].symbol} pool=v2 reason=same-tx has user-facing WETN leg`);
     }
 
     const tokenAmount = getBetterTokenAmount(receipt, p.token, wallet, direction, dec, tokenAmountFromSwap);
@@ -1322,7 +1358,7 @@ async function processWetnV3Event(p, event) {
     const outs = flows.filter(f => f.direction === "out");
     const ins  = flows.filter(f => f.direction === "in");
 
-    if (outs.length === 1 && ins.length === 1) {
+    if (outs.length === 1 && ins.length === 1 && !traderHasWetnLeg(receipt, wallet)) {
       if (!claimReclassified(event.transactionHash)) return;
 
       const outFlow = outs[0];
@@ -1343,6 +1379,9 @@ async function processWetnV3Event(p, event) {
       }
       console.log(`✅ Sent multi-hop ${symbolIn}→${symbolOut} (reclassified from ${p.symbol} WETN leg) [v3]`);
       return;
+    }
+    if (outs.length === 1 && ins.length === 1 && traderHasWetnLeg(receipt, wallet)) {
+      console.log(`⏭️ Internal routing token→token suppressed tx=${event.transactionHash} ${outs[0].symbol}→${ins[0].symbol} pool=v3 reason=same-tx has user-facing WETN leg`);
     }
 
     const tokenAmount = getBetterTokenAmount(receipt, p.token, wallet, direction, dec, tokenAmountFromSwap);
@@ -1423,6 +1462,11 @@ async function processCrossV2Event(p, event) {
     if (genuineIn == null) failRetryableEvent(key, "genuine-leg receipt unavailable " + event.transactionHash.slice(0, 10));
     if (!genuineIn) return;
 
+    if (isInternalRoutingPair(event.transactionHash, wallet, symbolIn, symbolOut)) {
+      console.log(`⏭️ Internal routing token→token suppressed tx=${event.transactionHash} trader=${wallet} ${symbolIn}→${symbolOut} pool=v2 reason=same-tx already reported WETN trade for pair token`);
+      return;
+    }
+
     let usdValue = 0;
     if (STABLES.includes(symbolIn)) usdValue = amountIn;
     else if (STABLES.includes(symbolOut)) usdValue = amountOut;
@@ -1473,6 +1517,11 @@ async function processCrossV3Event(p, event) {
     const genuineIn = await isGenuineLeg(event.transactionHash, wallet, ADDR[symbolIn], "from");
     if (genuineIn == null) failRetryableEvent(key, "genuine-leg receipt unavailable " + event.transactionHash.slice(0, 10));
     if (!genuineIn) return;
+
+    if (isInternalRoutingPair(event.transactionHash, wallet, symbolIn, symbolOut)) {
+      console.log(`⏭️ Internal routing token→token suppressed tx=${event.transactionHash} trader=${wallet} ${symbolIn}→${symbolOut} pool=v3 reason=same-tx already reported WETN trade for pair token`);
+      return;
+    }
 
     let usdValue = 0;
     if (STABLES.includes(symbolIn)) usdValue = amountIn;
@@ -1617,7 +1666,7 @@ async function start() {
   console.log(`Watching ${wetnPools.length} WETN pools + ${crossPools.length} cross pools`);
   console.log(`Main group: ${CHAT_ID}`);
   console.log(`CLUB group: ${CLUB_GROUP_CHAT_ID} → LIVE TRADES topic (${LIVE_TRADES_TOPIC_ID})`);
-  console.log(`  - WETN trades: ≥ $5 (CORE excluded)`);
+  console.log(`  - WETN trades: ≥ $5 (CORE excluded; USDC/USDT ≥ $500)`);
   console.log(`  - TOKEN→TOKEN swaps: LIVE TRADES except CLUB↔CORE`);
   console.log(`Router: ${ROUTER_ADDRESS}`);
   console.log("Enrichment: historical Position (block-1) + Market Cap + Holders");
