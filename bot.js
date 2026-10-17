@@ -867,19 +867,37 @@ async function sendTelegramPayload(chatId, message, gifUrl, extra) {
     }
     return "sent";
   } catch (err) {
-    if (isUncertainTelegramDelivery(err)) {
-      console.error("Telegram uncertain delivery, skipping retry:", err.message);
-      return "uncertain";
-    }
-    if (gifUrl && isSafeAnimationFallback(err)) {
+    if (gifUrl && isUncertainTelegramDelivery(err)) {
+      console.error("Telegram animation uncertain, trying text fallback:", err.message);
       try {
         await bot.sendMessage(chatId, message, opts);
+        console.log("Telegram text fallback succeeded after uncertain animation");
         return "sent";
       } catch (e) {
         if (isUncertainTelegramDelivery(e)) {
           console.error("Telegram text fallback uncertain, skipping retry:", e.message);
           return "uncertain";
         }
+        console.error("Telegram text fallback failed:", e.message);
+        throw e;
+      }
+    }
+    if (isUncertainTelegramDelivery(err)) {
+      console.error("Telegram uncertain delivery, skipping retry:", err.message);
+      return "uncertain";
+    }
+    if (gifUrl && isSafeAnimationFallback(err)) {
+      console.error("Telegram animation failed, trying text fallback:", err.message);
+      try {
+        await bot.sendMessage(chatId, message, opts);
+        console.log("Telegram text fallback succeeded after animation error");
+        return "sent";
+      } catch (e) {
+        if (isUncertainTelegramDelivery(e)) {
+          console.error("Telegram text fallback uncertain, skipping retry:", e.message);
+          return "uncertain";
+        }
+        console.error("Telegram text fallback failed:", e.message);
         throw e;
       }
     }
