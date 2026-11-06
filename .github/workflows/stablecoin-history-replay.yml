@@ -1,0 +1,29 @@
+name: Stablecoin history replay (read-only)
+
+on:
+  push:
+    branches:
+      - diagnostics/stablecoin-history-replay
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out diagnostic branch
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Replay historical USDT and USDC transfers (read-only)
+        env:
+          FROM_BLOCK: "16700000"
+          TO_BLOCK: "16777498"
+        run: node scripts/replay-stablecoin-history.js
