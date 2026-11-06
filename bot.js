@@ -167,6 +167,7 @@ let lastBlock = null;
 const tokenDecimals = {};
 const seenKeys = new Set();
 const stablecoinDepositSeen = new Set();
+let stablecoinLastBlock = null;
 const reclassifiedTxs = new Set();
 const userFacingTrades = new Set();
 const walletNameCache = new Map();
@@ -988,6 +989,7 @@ function buildDedupePayload() {
   return JSON.stringify({
     seen: Array.from(seenKeys),
     stablecoinDeposits: Array.from(stablecoinDepositSeen),
+    stablecoinLastBlock,
     reclass: Array.from(reclassifiedTxs),
     lastBlock
   });
@@ -1040,6 +1042,9 @@ function loadDedupeState() {
       }
       if (Array.isArray(data.stablecoinDeposits)) {
         for (const k of data.stablecoinDeposits) stablecoinDepositSeen.add(k);
+      }
+      if (Number.isInteger(data.stablecoinLastBlock) && data.stablecoinLastBlock > 0) {
+        stablecoinLastBlock = data.stablecoinLastBlock;
       }
       if (Array.isArray(data.reclass)) {
         for (const k of data.reclass) reclassifiedTxs.add(k);
@@ -1697,10 +1702,42 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
   }
 }
 
+let depositMonitorRunning = false;
+
+async function runDepositMonitorLoop() {
+  if (depositMonitorRunning || !HYPER_TRANSACTION_CHAT_ID) return;
+  depositMonitorRunning = true;
+  try {
+    while (true) {
+      const head = await provider.getBlockNumber();
+      if (stablecoinLastBlock == null) {
+        // Begin from the current head on first activation; do not send historical alerts.
+        stablecoinLastBlock = head;
+        schedulePersist();
+        console.log(`[DEPOSIT MONITOR] Baseline established at block ${head}; monitoring new blocks`);
+      }
+      const fromBlock = stablecoinLastBlock + 1;
+      if (fromBlock > head) {
+        await sleep(POLL_HEAD_MS);
+        continue;
+      }
+      try {
+        await scanStablecoinDeposits(fromBlock, head);
+        stablecoinLastBlock = head;
+        schedulePersist();
+      } catch (error) {
+        console.error("[DEPOSIT MONITOR] Scan failed; cursor unchanged for safe retry:", error.message);
+        await sleep(SCAN_RETRY_MS);
+      }
+    }
+  } finally {
+    depositMonitorRunning = false;
+  }
+}
+
 async function scanRange(fromBlock, toBlock) {
   const t0 = Date.now();
   console.log(`Checking blocks ${fromBlock} to ${toBlock}`);
-  await scanStablecoinDeposits(fromBlock, toBlock);
   console.log(`[PERF] block=${toBlock} range=${fromBlock}-${toBlock} lag=${toBlock - fromBlock}`);
 
   const twq = Date.now();
@@ -1801,6 +1838,7 @@ async function start() {
   if (HYPER_TRANSACTION_CHAT_ID) {
     await initializeDepositTokenMetadata();
     console.log(`[DEPOSIT MONITOR] Watching USDT + USDC deposits to ${DEPOSIT_WALLET}; alerts → Hyper Transaction group`);
+    runDepositMonitorLoop().catch((error) => console.error("[DEPOSIT MONITOR] Worker stopped:", error.message));
   } else {
     console.warn("[DEPOSIT MONITOR] Not active until HYPER_TRANSACTION_CHAT_ID is set in Render");
   }
