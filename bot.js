@@ -2013,4 +2013,67 @@ async function start() {
 start();
 
 const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => { res.writeHead(200); res.end("Bot is running"); }).listen(PORT);
+const HISTORICAL_REPLAY_TX = "0x9b655d61c8696a2b471b18ab10a7e2e7a02cbe2da5f72920934af84eb936fb6a";
+let historicalReplaySent = false;
+http.createServer(async (req, res) => {
+  if (req.method === "POST" && req.url === "/internal/replay-historical-usdc-credit") {
+    const replayKey = process.env.WALLET_INTELLIGENCE_REPLAY_KEY || "";
+    const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+    const crypto = require("crypto");
+    const expectedBuf = Buffer.from(replayKey);
+    const suppliedBuf = Buffer.from(supplied);
+    const authorized = replayKey.length >= 32 &&
+      expectedBuf.length === suppliedBuf.length &&
+      crypto.timingSafeEqual(expectedBuf, suppliedBuf);
+    if (!authorized) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "Unauthorized" }));
+      return;
+    }
+    if (historicalReplaySent) {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "Replay already attempted in this process" }));
+      return;
+    }
+    if (!WALLET_INTELLIGENCE_CHAT_ID) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "Wallet Intelligence destination is not configured" }));
+      return;
+    }
+    historicalReplaySent = true;
+    const message = [
+      "🧪 *HISTORICAL REPLAY — TEST*",
+      "",
+      "💰 *WALLET INTELLIGENCE — STABLECOIN CREDIT*",
+      "",
+      "*Asset:* USDC",
+      "*Amount:* 2,202.00 USDC",
+      "*Network:* Electroneum Smart Chain",
+      "*Credit type:* Mint (zero-address Transfer)",
+      "*Date:* 4 November 2026, 14:33:15 UTC",
+      "*Block:* 16,738,852",
+      "*From:* \`0x0000000000000000000000000000000000000000\`",
+      "*To:* \`0x210D9A9b9173E0691ac89D32B4EB9600464FeDEB\`",
+      "*Transaction:* [View on Electroneum Explorer](https://blockexplorer.electroneum.com/tx/" + HISTORICAL_REPLAY_TX + ")",
+      "",
+      "_Historical credit replayed for notification testing. No new deposit occurred._"
+    ].join("\n");
+    try {
+      const delivery = await sendTelegramPayload(WALLET_INTELLIGENCE_CHAT_ID, message, null);
+      if (delivery === "sent") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, delivery: "sent", transaction: HISTORICAL_REPLAY_TX }));
+      } else {
+        res.writeHead(202, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, delivery: "uncertain", transaction: HISTORICAL_REPLAY_TX }));
+      }
+    } catch (error) {
+      console.error("[DEPOSIT MONITOR] Historical Telegram replay failed:", error.message);
+      res.writeHead(502, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "Telegram delivery failed" }));
+    }
+    return;
+  }
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Bot is running");
+}).listen(PORT);
