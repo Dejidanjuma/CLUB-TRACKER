@@ -1,0 +1,30 @@
+name: CLUB-TRACKER checks
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - feat/hyper-stablecoin-wallet-monitor
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Check JavaScript syntax
+        run: node --check bot.js
+      - name: Run monitor regression tests
+        run: npm test
