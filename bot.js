@@ -11,6 +11,13 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const CLUB_GROUP_CHAT_ID = process.env.CLUB_GROUP_CHAT_ID || "-1002386155004";
 const LIVE_TRADES_TOPIC_ID = 55341;
+// Separate destination: never route wallet-deposit alerts into the Live Trades topic.
+const HYPER_TRANSACTION_CHAT_ID = process.env.HYPER_TRANSACTION_CHAT_ID || null;
+const DEPOSIT_WALLET = "0x210D9A9b9173E0691ac89D32B4EB9600464FeDEB";
+const DEPOSIT_TOKENS = {
+  USDT: "0x48E722f1458b253c2FB0E573F939318D7Dbd54e7",
+  USDC: "0x3187deAd7A2Bd6770F5Fe81495D1B715926AAe6e"
+};
 const BLOCKSCOUT_BASE = "https://blockexplorer.electroneum.com/api/v2";
 const LIVE_TRADES_EXCLUDED_SYMBOLS = new Set(["CORE"]);
 const LIVE_TRADES_EXCLUDED_PAIRS = new Set(["CLUB|CORE", "CORE|CLUB"]);
@@ -159,6 +166,7 @@ let etnPriceUsd = 0.00071;
 let lastBlock = null;
 const tokenDecimals = {};
 const seenKeys = new Set();
+const stablecoinDepositSeen = new Set();
 const reclassifiedTxs = new Set();
 const userFacingTrades = new Set();
 const walletNameCache = new Map();
@@ -979,6 +987,7 @@ let shuttingDown = false;
 function buildDedupePayload() {
   return JSON.stringify({
     seen: Array.from(seenKeys),
+    stablecoinDeposits: Array.from(stablecoinDepositSeen),
     reclass: Array.from(reclassifiedTxs),
     lastBlock
   });
@@ -1028,6 +1037,9 @@ function loadDedupeState() {
     if (data) {
       if (Array.isArray(data.seen)) {
         for (const k of data.seen) seenKeys.add(k);
+      }
+      if (Array.isArray(data.stablecoinDeposits)) {
+        for (const k of data.stablecoinDeposits) stablecoinDepositSeen.add(k);
       }
       if (Array.isArray(data.reclass)) {
         for (const k of data.reclass) reclassifiedTxs.add(k);
@@ -1595,9 +1607,100 @@ async function processDecodedCross(log) {
   }
 }
 
+const DEPOSIT_TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
+const DEPOSIT_ERC20_ABI = [
+  "function decimals() view returns (uint8)",
+  "function symbol() view returns (string)"
+];
+let depositTokenMetadata = null;
+
+async function initializeDepositTokenMetadata() {
+  const metadata = {};
+  for (const [expectedSymbol, address] of Object.entries(DEPOSIT_TOKENS)) {
+    const token = new ethers.Contract(address, DEPOSIT_ERC20_ABI, provider);
+    const [symbol, decimals] = await Promise.all([token.symbol(), token.decimals()]);
+    if (String(symbol).toUpperCase() !== expectedSymbol) {
+      throw new Error(`Stablecoin contract mismatch: expected ${expectedSymbol}, received ${symbol} at ${address}`);
+    }
+    const parsedDecimals = Number(decimals);
+    if (!Number.isInteger(parsedDecimals) || parsedDecimals < 0 || parsedDecimals > 36) {
+      throw new Error(`Invalid decimals for ${expectedSymbol}`);
+    }
+    metadata[address.toLowerCase()] = { symbol: expectedSymbol, decimals: parsedDecimals, address };
+    console.log(`Deposit monitor token verified: ${expectedSymbol} ${address} decimals=${parsedDecimals}`);
+  }
+  depositTokenMetadata = metadata;
+}
+
+async function scanStablecoinDeposits(fromBlock, toBlock) {
+  if (!HYPER_TRANSACTION_CHAT_ID) {
+    console.log("[DEPOSIT MONITOR] Disabled: HYPER_TRANSACTION_CHAT_ID is not configured");
+    return;
+  }
+  if (!depositTokenMetadata) throw new Error("Deposit token metadata has not been verified");
+  const recipientTopic = walletTopicOf(DEPOSIT_WALLET);
+  const logs = await provider.getLogs({
+    address: Object.values(DEPOSIT_TOKENS),
+    topics: [DEPOSIT_TRANSFER_TOPIC, null, recipientTopic],
+    fromBlock,
+    toBlock
+  });
+
+  for (const log of logs) {
+    const token = depositTokenMetadata[String(log.address).toLowerCase()];
+    if (!token) continue;
+    const logIndex = Number(log.index ?? log.logIndex);
+    if (!Number.isInteger(logIndex) || logIndex < 0) throw new Error("Stablecoin transfer log has no valid log index");
+    const txHash = String(log.transactionHash).toLowerCase();
+    const eventKey = `52014:${txHash}:${logIndex}`;
+    if (stablecoinDepositSeen.has(eventKey)) continue;
+
+    const topics = log.topics || [];
+    if (topics.length < 3 || String(topics[0]).toLowerCase() !== DEPOSIT_TRANSFER_TOPIC.toLowerCase()) {
+      throw new Error("Malformed ERC-20 Transfer event returned by RPC");
+    }
+    const from = ethers.getAddress("0x" + String(topics[1]).slice(-40));
+    const to = ethers.getAddress("0x" + String(topics[2]).slice(-40));
+    if (to.toLowerCase() !== DEPOSIT_WALLET.toLowerCase()) continue;
+    const rawAmount = BigInt(log.data);
+    if (rawAmount <= 0n) continue;
+
+    // A mined log is immediately visible to the monitor; verify its receipt is successful
+    // before notifying. Only one message is sent for this event.
+    const receipt = await provider.getTransactionReceipt(txHash);
+    if (!receipt) throw new Error(`Receipt not yet available for detected deposit ${txHash}`);
+    if (Number(receipt.status) !== 1) {
+      stablecoinDepositSeen.add(eventKey);
+      schedulePersist();
+      continue;
+    }
+
+    const amount = ethers.formatUnits(rawAmount, token.decimals);
+    const message = [
+      "💰 *STABLECOIN DEPOSIT DETECTED*",
+      "",
+      `*Asset:* ${token.symbol}`,
+      `*Amount:* ${amount}`,
+      `*Network:* Electroneum Smart Chain`,
+      `*From:* \`${from}\``,
+      `*To:* \`${to}\``,
+      `*Block:* ${log.blockNumber}`,
+      `*Transaction:* [View on Electroneum Explorer](https://blockexplorer.electroneum.com/tx/${txHash})`,
+      "",
+      "_Detected by Wallet Deposit Monitor_"
+    ].join("\n");
+
+    await sendTelegramPayload(HYPER_TRANSACTION_CHAT_ID, message, null);
+    stablecoinDepositSeen.add(eventKey);
+    schedulePersist();
+    console.log(`[DEPOSIT MONITOR] Alert sent: ${token.symbol} ${amount} tx=${txHash} logIndex=${logIndex}`);
+  }
+}
+
 async function scanRange(fromBlock, toBlock) {
   const t0 = Date.now();
   console.log(`Checking blocks ${fromBlock} to ${toBlock}`);
+  await scanStablecoinDeposits(fromBlock, toBlock);
   console.log(`[PERF] block=${toBlock} range=${fromBlock}-${toBlock} lag=${toBlock - fromBlock}`);
 
   const twq = Date.now();
@@ -1695,6 +1798,12 @@ async function start() {
   console.log("Dedupe persist: async file " + DEDUPE_STATE_PATH + " (set DEDUPE_STATE_PATH or mount /var/data for deploy-safe state)");
   loadDedupeState();
   await loadDecimals();
+  if (HYPER_TRANSACTION_CHAT_ID) {
+    await initializeDepositTokenMetadata();
+    console.log(`[DEPOSIT MONITOR] Watching USDT + USDC deposits to ${DEPOSIT_WALLET}; alerts → Hyper Transaction group`);
+  } else {
+    console.warn("[DEPOSIT MONITOR] Not active until HYPER_TRANSACTION_CHAT_ID is set in Render");
+  }
   await updatePrice();
   setInterval(updatePrice, 120000);
   setInterval(scheduleTick, POLL_HEAD_MS);
