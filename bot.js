@@ -1844,8 +1844,18 @@ async function runDepositMonitorLoop() {
   if (depositMonitorRunning || !HYPER_TRANSACTION_CHAT_ID || !STABLECOIN_DB_ENABLED) return;
   depositMonitorRunning = true;
   try {
-    const initialHead = await provider.getBlockNumber();
-    await initializeStablecoinCheckpoint(initialHead);
+    // Keep transient RPC/token metadata failures isolated from the main Telegram bot.
+    // Retry initialization instead of permanently abandoning deposit monitoring.
+    while (!depositTokenMetadata || stablecoinLastBlock === null) {
+      try {
+        if (!depositTokenMetadata) await initializeDepositTokenMetadata();
+        const initialHead = await provider.getBlockNumber();
+        await initializeStablecoinCheckpoint(initialHead);
+      } catch (error) {
+        console.error("[DEPOSIT MONITOR] Initialization failed; retrying safely:", error.message);
+        await sleep(SCAN_RETRY_MS);
+      }
+    }
 
     while (true) {
       const head = await provider.getBlockNumber();
@@ -1970,8 +1980,7 @@ async function start() {
   loadDedupeState();
   await loadDecimals();
   if (HYPER_TRANSACTION_CHAT_ID && STABLECOIN_DB_ENABLED) {
-    await initializeDepositTokenMetadata();
-    console.log(`[DEPOSIT MONITOR] Durable Supabase storage enabled; watching USDT + USDC deposits to ${DEPOSIT_WALLET}`);
+    console.log(`[DEPOSIT MONITOR] Durable Supabase storage configured; initializing USDT + USDC monitoring for ${DEPOSIT_WALLET}`);
     runDepositMonitorLoop().catch((error) => console.error("[DEPOSIT MONITOR] Worker stopped:", error.message));
   } else if (!HYPER_TRANSACTION_CHAT_ID) {
     console.warn("[DEPOSIT MONITOR] Not active: Telegram destination is not configured");
