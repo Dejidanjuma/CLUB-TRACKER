@@ -70,3 +70,11 @@ test("deposit alert identifies Wallet Intelligence, not the trading monitor", ()
   assert.match(source, /Detected by Wallet Intelligence Monitor/);
   assert.doesNotMatch(source, /Detected by Hyper Transaction Monitor/);
 });
+
+test("future records distinguish mint from transfer and retain transaction-level provenance without guessing bridge source", () => {
+  assert.match(source, /const transferType = from\.toLowerCase\(\) === ethers\.ZeroAddress\.toLowerCase\(\) \? "mint" : "transfer"/);
+  assert.match(source, /transaction_sender: String\(transaction\.from\)\.toLowerCase\(\)/);
+  assert.match(source, /bridge_source: "unknown"/);
+  assert.match(source, /\*Credit type:\* \$\{transferType\}/);
+  assert.ok(source.includes('"*Transaction sender:* `" + transaction.from + "`"'));
+});

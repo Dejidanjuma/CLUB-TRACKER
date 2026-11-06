@@ -1769,8 +1769,13 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
     if (!receipt) throw new Error(`Receipt not yet available for detected deposit ${txHash}`);
     if (Number(receipt.status) !== 1) continue;
 
+    // Store transaction-level provenance separately from the ERC-20 Transfer sender.
+    // A zero-address Transfer is a mint, but is not by itself proof of Hyperlane origin.
+    const transaction = await provider.getTransaction(txHash);
+    if (!transaction) throw new Error(`Transaction not yet available for detected deposit ${txHash}`);
     const block = await provider.getBlock(log.blockNumber);
     const amount = ethers.formatUnits(rawAmount, token.decimals);
+    const transferType = from.toLowerCase() === ethers.ZeroAddress.toLowerCase() ? "mint" : "transfer";
     const record = {
       chain_id: 52014,
       transaction_hash: txHash,
@@ -1784,6 +1789,10 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
       raw_amount: rawAmount.toString(),
       token_decimals: token.decimals,
       receipt_status: 1,
+      transfer_type: transferType,
+      transaction_sender: String(transaction.from).toLowerCase(),
+      // Remain conservative until a verified bridge-specific receipt signature is matched.
+      bridge_source: "unknown",
       telegram_chat_id: String(WALLET_INTELLIGENCE_CHAT_ID)
     };
 
@@ -1799,6 +1808,8 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
       "*Network:* Electroneum Smart Chain",
       `*From:* \`${from}\``,
       `*To:* \`${to}\``,
+      `*Credit type:* ${transferType}`,
+      "*Transaction sender:* `" + transaction.from + "`",
       `*Block:* ${log.blockNumber}`,
       `*Transaction:* [View on Electroneum Explorer](https://blockexplorer.electroneum.com/tx/${txHash})`,
       "",
