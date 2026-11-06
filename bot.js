@@ -1808,6 +1808,8 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
       "*Network:* Electroneum Smart Chain",
       `*From:* \`${from}\``,
       `*To:* \`${to}\``,
+      `*Credit type:* ${transferType}`,
+      `*Transaction sender:* `${transaction.from}``,
       `*Block:* ${log.blockNumber}`,
       `*Transaction:* [View on Electroneum Explorer](https://blockexplorer.electroneum.com/tx/${txHash})`,
       "",
