@@ -39,9 +39,11 @@ test("alerts are durably claimed and terminal states suppress duplicates", () =>
   assert.match(source, /alert_status: "uncertain"/);
 });
 
-test("deposit alerts use the configured Hyper group and never a topic thread", () => {
-  assert.match(source, /HYPER_TRANSACTION_CHAT_ID = process\.env\.HYPER_TRANSACTION_CHAT_ID \|\| CHAT_ID/);
-  assert.match(source, /sendTelegramPayload\(HYPER_TRANSACTION_CHAT_ID, message, null\)/);
+test("deposit alerts use only the dedicated Wallet Intelligence group and never a topic thread", () => {
+  assert.match(source, /WALLET_INTELLIGENCE_CHAT_ID = process\.env\.WALLET_INTELLIGENCE_CHAT_ID/);
+  assert.doesNotMatch(source, /WALLET_INTELLIGENCE_CHAT_ID = process\.env\.WALLET_INTELLIGENCE_CHAT_ID \|\|/);
+  assert.match(source, /sendTelegramPayload\(WALLET_INTELLIGENCE_CHAT_ID, message, null\)/);
+  assert.match(source, /if \(depositMonitorRunning \|\| !WALLET_INTELLIGENCE_CHAT_ID \|\| !STABLECOIN_DB_ENABLED\) return/);
 });
 
 test("first activation establishes a current-head baseline and cursor advances only after scan", () => {
