@@ -24,6 +24,6 @@ jobs:
         run: npm ci
       - name: Replay historical USDT and USDC transfers (read-only)
         env:
-          FROM_BLOCK: "16700000"
-          TO_BLOCK: "16777498"
+          FROM_BLOCK: "16000000"
+          TO_BLOCK: "16699999"
         run: node scripts/replay-stablecoin-history.js
