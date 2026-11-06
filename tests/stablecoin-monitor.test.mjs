@@ -76,5 +76,5 @@ test("future records distinguish mint from transfer and retain transaction-level
   assert.match(source, /transaction_sender: String\(transaction\.from\)\.toLowerCase\(\)/);
   assert.match(source, /bridge_source: "unknown"/);
   assert.match(source, /\*Credit type:\* \$\{transferType\}/);
-  assert.match(source, /"\\*Transaction sender:\\* \\`" \\+ transaction\\.from \\+ "\\`"/);
+  assert.ok(source.includes('"*Transaction sender:* `" + transaction.from + "`"'));
 });
