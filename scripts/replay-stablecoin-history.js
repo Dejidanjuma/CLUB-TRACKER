@@ -57,6 +57,9 @@ async function main() {
       }), `${token.symbol} logs ${start}-${end}`);
       for (const log of logs) {
         if (log.topics[2]?.toLowerCase() !== recipientTopic) continue;
+        const sender = "0x" + log.topics[1].slice(26);
+        // Exclude mint events: a zero-address sender is not an incoming wallet deposit.
+        if (sender.toLowerCase() === "0x0000000000000000000000000000000000000000") continue;
         const parsed = ethers.AbiCoder.defaultAbiCoder().decode(["uint256"], log.data);
         const amountRaw = parsed[0];
         if (amountRaw === 0n) continue;
@@ -73,7 +76,7 @@ async function main() {
           blockNumber: log.blockNumber,
           transactionHash: log.transactionHash,
           logIndex: log.index,
-          from: ethers.getAddress("0x" + log.topics[1].slice(26)),
+          from: ethers.getAddress(sender),
           to: WALLET,
           explorer: `https://blockexplorer.electroneum.com/tx/${log.transactionHash}`,
         });
