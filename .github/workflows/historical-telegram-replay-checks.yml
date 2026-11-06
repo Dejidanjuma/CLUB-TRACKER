@@ -1,0 +1,25 @@
+name: Historical Telegram replay endpoint checks
+
+on:
+  push:
+    branches:
+      - diagnostics/historical-telegram-alert-replay
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Check bot syntax
+        run: node --check bot.js
+      - name: Run repository tests
+        run: npm test
