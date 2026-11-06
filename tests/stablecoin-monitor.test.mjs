@@ -14,7 +14,7 @@ test("monitor is pinned to Electroneum and the configured wallet", () => {
 test("Supabase requests support both modern secret and legacy service-role keys", () => {
   assert.match(source, /apikey: SUPABASE_SERVICE_ROLE_KEY/);
   assert.match(source, /if \(!SUPABASE_SERVICE_ROLE_KEY\.startsWith\("sb_secret_"\)\)/);
-  assert.match(source, /headers\.Authorization = `Bearer \\${SUPABASE_SERVICE_ROLE_KEY\}`/);
+  assert.match(source, /headers\\.Authorization = `Bearer \\$\\{SUPABASE_SERVICE_ROLE_KEY\\}`/);
 });
 
 test("scan only queries transfers to the configured recipient", () => {
