@@ -1990,7 +1990,7 @@ async function start() {
       try {
         const testResult = await sendTelegramPayload(
           WALLET_INTELLIGENCE_CHAT_ID,
-          "🧪 *WALLET INTELLIGENCE TEST*\\n\\nTelegram delivery is working. This message was sent only to the ETN WALLET INTELLIGENCE group.\\n\\nUSDT/USDC deposit monitoring is active.",
+          "🧪 *WALLET INTELLIGENCE TEST*\n\nTelegram delivery is working. This message was sent only to the ETN WALLET INTELLIGENCE group.\n\nUSDT/USDC deposit monitoring is active.",
           null
         );
         console.log("[DEPOSIT MONITOR] One-time Wallet Intelligence Telegram test result:", testResult);
