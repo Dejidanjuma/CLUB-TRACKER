@@ -1802,7 +1802,7 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
       `*Block:* ${log.blockNumber}`,
       `*Transaction:* [View on Electroneum Explorer](https://blockexplorer.electroneum.com/tx/${txHash})`,
       "",
-      "_Detected by Hyper Transaction Monitor_"
+      "_Detected by Wallet Intelligence Monitor_"
     ].join("\n");
 
     // Claim this event durably before calling Telegram. If the process crashes mid-send,
