@@ -1785,7 +1785,7 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
 
     const stored = await getOrCreateStablecoinDeposit(record);
     if (!stored) throw new Error(`Could not confirm durable deposit record for ${txHash}`);
-    if (stored.alert_status === "sent" || stored.alert_status === "uncertain") continue;
+    if (stored.alert_status === "sent" || stored.alert_status === "uncertain" || stored.alert_status === "sending") continue;
 
     const message = [
       "💰 *STABLECOIN DEPOSIT DETECTED*",
@@ -1801,28 +1801,35 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
       "_Detected by Hyper Transaction Monitor_"
     ].join("\n");
 
+    // Claim this event durably before calling Telegram. If the process crashes mid-send,
+    // a restart will not send a second copy; a stuck "sending" row can be reviewed manually.
+    await updateStablecoinDeposit(txHash, logIndex, { alert_status: "sending", alert_error: null });
+
+    let delivery;
     try {
-      const delivery = await sendTelegramPayload(HYPER_TRANSACTION_CHAT_ID, message, null);
-      if (delivery === "sent") {
-        await updateStablecoinDeposit(txHash, logIndex, {
-          alert_status: "sent",
-          telegram_sent_at: new Date().toISOString(),
-          alert_error: null
-        });
-        console.log(`[DEPOSIT MONITOR] Alert sent: ${token.symbol} ${amount} tx=${txHash} logIndex=${logIndex}`);
-      } else {
-        // Telegram reported uncertain delivery. Do not auto-retry and risk a duplicate.
-        await updateStablecoinDeposit(txHash, logIndex, {
-          alert_status: "uncertain",
-          alert_error: "Telegram delivery result was uncertain; automatic retry suppressed"
-        });
-        console.error(`[DEPOSIT MONITOR] Telegram delivery uncertain; retry suppressed for ${txHash}`);
-      }
+      delivery = await sendTelegramPayload(HYPER_TRANSACTION_CHAT_ID, message, null);
     } catch (error) {
       await updateStablecoinDeposit(txHash, logIndex, {
+        alert_status: "pending",
         alert_error: String(error.message || error).slice(0, 1000)
       });
       throw error;
+    }
+
+    if (delivery === "sent") {
+      await updateStablecoinDeposit(txHash, logIndex, {
+        alert_status: "sent",
+        telegram_sent_at: new Date().toISOString(),
+        alert_error: null
+      });
+      console.log(`[DEPOSIT MONITOR] Alert sent: ${token.symbol} ${amount} tx=${txHash} logIndex=${logIndex}`);
+    } else {
+      // Telegram reported uncertain delivery. Do not auto-retry and risk a duplicate.
+      await updateStablecoinDeposit(txHash, logIndex, {
+        alert_status: "uncertain",
+        alert_error: "Telegram delivery result was uncertain; automatic retry suppressed"
+      });
+      console.error(`[DEPOSIT MONITOR] Telegram delivery uncertain; retry suppressed for ${txHash}`);
     }
   }
 }
