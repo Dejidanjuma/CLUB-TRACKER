@@ -1823,7 +1823,6 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
     if (delivery === "sent") {
       await updateStablecoinDeposit(txHash, logIndex, {
         alert_status: "sent",
-        telegram_sent_at: new Date().toISOString(),
         alert_error: null
       });
       console.log(`[DEPOSIT MONITOR] Alert sent: ${token.symbol} ${amount} tx=${txHash} logIndex=${logIndex}`);
@@ -1860,19 +1859,21 @@ async function runDepositMonitorLoop() {
     }
 
     while (true) {
-      const head = await provider.getBlockNumber();
-      const fromBlock = stablecoinLastBlock + 1;
-      if (fromBlock > head) {
-        await sleep(POLL_HEAD_MS);
-        continue;
-      }
-      const toBlock = Math.min(head, stablecoinLastBlock + MAX_DEPOSIT_SCAN_BLOCKS);
       try {
+        const head = await provider.getBlockNumber();
+        const fromBlock = stablecoinLastBlock + 1;
+        if (fromBlock > head) {
+          await sleep(POLL_HEAD_MS);
+          continue;
+        }
+        const toBlock = Math.min(head, stablecoinLastBlock + MAX_DEPOSIT_SCAN_BLOCKS);
         await scanStablecoinDeposits(fromBlock, toBlock);
         await persistStablecoinCheckpoint(toBlock + 1);
         stablecoinLastBlock = toBlock;
       } catch (error) {
-        console.error("[DEPOSIT MONITOR] Scan failed; durable cursor unchanged for safe retry:", error.message);
+        // Includes transient head/RPC failures as well as log, receipt and DB errors.
+        // Keep the worker alive and retry from the last durable checkpoint.
+        console.error("[DEPOSIT MONITOR] Poll/scan failed; durable cursor unchanged for safe retry:", error.message);
         await sleep(SCAN_RETRY_MS);
       }
     }
