@@ -1823,6 +1823,7 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
     if (delivery === "sent") {
       await updateStablecoinDeposit(txHash, logIndex, {
         alert_status: "sent",
+        telegram_sent_at: new Date().toISOString(),
         alert_error: null
       });
       console.log(`[DEPOSIT MONITOR] Alert sent: ${token.symbol} ${amount} tx=${txHash} logIndex=${logIndex}`);
