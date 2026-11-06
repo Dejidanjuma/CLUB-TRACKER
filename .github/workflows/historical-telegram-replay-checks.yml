@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - diagnostics/historical-telegram-alert-replay
+      - fix/durable-historical-replay-guard
 
 permissions:
   contents: read
