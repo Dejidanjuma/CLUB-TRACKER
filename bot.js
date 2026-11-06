@@ -1846,11 +1846,13 @@ async function runDepositMonitorLoop() {
   try {
     // Keep transient RPC/token metadata failures isolated from the main Telegram bot.
     // Retry initialization instead of permanently abandoning deposit monitoring.
-    while (!depositTokenMetadata || stablecoinLastBlock === null) {
+    let checkpointReady = false;
+    while (!checkpointReady) {
       try {
         if (!depositTokenMetadata) await initializeDepositTokenMetadata();
         const initialHead = await provider.getBlockNumber();
         await initializeStablecoinCheckpoint(initialHead);
+        checkpointReady = true;
       } catch (error) {
         console.error("[DEPOSIT MONITOR] Initialization failed; retrying safely:", error.message);
         await sleep(SCAN_RETRY_MS);
