@@ -1799,7 +1799,7 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
       `*Transaction:* [View on Electroneum Explorer](https://blockexplorer.electroneum.com/tx/${txHash})`,
       "",
       "_Detected by Hyper Transaction Monitor_"
-    ].join("\\n");
+    ].join("\n");
 
     try {
       const delivery = await sendTelegramPayload(HYPER_TRANSACTION_CHAT_ID, message, null);
