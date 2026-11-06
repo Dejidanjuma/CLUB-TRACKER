@@ -12,7 +12,7 @@ const CHAT_ID = process.env.CHAT_ID;
 const CLUB_GROUP_CHAT_ID = process.env.CLUB_GROUP_CHAT_ID || "-1002386155004";
 const LIVE_TRADES_TOPIC_ID = 55341;
 // Separate destination: never route wallet-deposit alerts into the Live Trades topic.
-const HYPER_TRANSACTION_CHAT_ID = process.env.HYPER_TRANSACTION_CHAT_ID || CHAT_ID;
+const WALLET_INTELLIGENCE_CHAT_ID = process.env.WALLET_INTELLIGENCE_CHAT_ID || CHAT_ID;
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const STABLECOIN_DB_ENABLED = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
@@ -1734,7 +1734,7 @@ async function updateStablecoinDeposit(txHash, logIndex, patch) {
 }
 
 async function scanStablecoinDeposits(fromBlock, toBlock) {
-  if (!HYPER_TRANSACTION_CHAT_ID) {
+  if (!WALLET_INTELLIGENCE_CHAT_ID) {
     console.log("[DEPOSIT MONITOR] Disabled: destination chat is not configured");
     return;
   }
@@ -1784,7 +1784,7 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
       raw_amount: rawAmount.toString(),
       token_decimals: token.decimals,
       receipt_status: 1,
-      telegram_chat_id: String(HYPER_TRANSACTION_CHAT_ID)
+      telegram_chat_id: String(WALLET_INTELLIGENCE_CHAT_ID)
     };
 
     const stored = await getOrCreateStablecoinDeposit(record);
@@ -1811,7 +1811,7 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
 
     let delivery;
     try {
-      delivery = await sendTelegramPayload(HYPER_TRANSACTION_CHAT_ID, message, null);
+      delivery = await sendTelegramPayload(WALLET_INTELLIGENCE_CHAT_ID, message, null);
     } catch (error) {
       await updateStablecoinDeposit(txHash, logIndex, {
         alert_status: "pending",
@@ -1841,7 +1841,7 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
 let depositMonitorRunning = false;
 
 async function runDepositMonitorLoop() {
-  if (depositMonitorRunning || !HYPER_TRANSACTION_CHAT_ID || !STABLECOIN_DB_ENABLED) return;
+  if (depositMonitorRunning || !WALLET_INTELLIGENCE_CHAT_ID || !STABLECOIN_DB_ENABLED) return;
   depositMonitorRunning = true;
   try {
     // Keep transient RPC/token metadata failures isolated from the main Telegram bot.
@@ -1983,10 +1983,10 @@ async function start() {
   console.log("Dedupe persist: async file " + DEDUPE_STATE_PATH + " (set DEDUPE_STATE_PATH or mount /var/data for deploy-safe state)");
   loadDedupeState();
   await loadDecimals();
-  if (HYPER_TRANSACTION_CHAT_ID && STABLECOIN_DB_ENABLED) {
+  if (WALLET_INTELLIGENCE_CHAT_ID && STABLECOIN_DB_ENABLED) {
     console.log(`[DEPOSIT MONITOR] Durable Supabase storage configured; initializing USDT + USDC monitoring for ${DEPOSIT_WALLET}`);
     runDepositMonitorLoop().catch((error) => console.error("[DEPOSIT MONITOR] Worker stopped:", error.message));
-  } else if (!HYPER_TRANSACTION_CHAT_ID) {
+  } else if (!WALLET_INTELLIGENCE_CHAT_ID) {
     console.warn("[DEPOSIT MONITOR] Not active: Telegram destination is not configured");
   } else {
     console.warn("[DEPOSIT MONITOR] Not active: add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to Render");
