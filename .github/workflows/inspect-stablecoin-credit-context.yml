@@ -1,0 +1,56 @@
+name: Inspect stablecoin credit transaction context
+
+on:
+  push:
+    branches:
+      - diagnostics/stablecoin-history-replay
+    paths:
+      - ".github/workflows/inspect-stablecoin-credit-context.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Inspect transaction, receipt, block time and all emitted logs (read-only)
+        run: |
+          node --input-type=module <<'NODE'
+          import { ethers } from "ethers";
+          const hashes = [
+            "0x8970c16b2db62e7a41d021d0cea935724c9091445937b9329bfca1743e0e8ad5",
+            "0x336503189e5d516b31ad1c089721eca048f1d0081ae07b82879be90320879788",
+            "0x9c28ae70d11b044eafc0c191b1f55701a1ec9637206933b88f821d0eb131d69c",
+            "0xb1f89bb5b3f08da99f29b50d21a0270f8bc99aaa1a88ec075d12a4e124118528",
+            "0x53e55e00271b472d89edfd0f9730397cfc3825bc5c5d1a3badc15d19b963f9bf",
+            "0x74a23ae69990283c9873c3201b966ec3318b257b67e2307dcf23580f6f293f20",
+            "0x1515320b28499b3dcb29b333dbf1eeb228d64a39d40ee11ebf78850b0f97cb0f",
+            "0x0a87a13fd34fccd93366edac73c0f39c1b56b085bde54a1ab73e2fe7a48f60fd",
+            "0x9b655d61c8696a2b471b18ab10a7e2e7a02cbe2da5f72920934af84eb936fb6a"
+          ];
+          const p = new ethers.JsonRpcProvider("https://rpc.ankr.com/electroneum", 52014, { staticNetwork: true });
+          const out = [];
+          for (const hash of hashes) {
+            const [tx, receipt] = await Promise.all([p.getTransaction(hash), p.getTransactionReceipt(hash)]);
+            if (!tx || !receipt || Number(receipt.status) !== 1) throw new Error("Missing transaction or successful receipt: " + hash);
+            const block = await p.getBlock(receipt.blockNumber);
+            out.push({
+              hash, blockNumber: receipt.blockNumber,
+              blockTimestamp: block ? new Date(Number(block.timestamp) * 1000).toISOString() : null,
+              txFrom: tx.from, txTo: tx.to, value: tx.value.toString(),
+              inputSelector: tx.data.slice(0, 10), inputLength: tx.data.length,
+              status: receipt.status,
+              logs: receipt.logs.map((l) => ({ address: l.address, topics: l.topics, data: l.data, logIndex: l.index }))
+            });
+          }
+          console.log(JSON.stringify({ mode: "READ_ONLY_TRANSACTION_CONTEXT_INSPECTION", sideEffects: false, transactions: out }, null, 2));
+          await p.destroy();
+          NODE
