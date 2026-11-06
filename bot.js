@@ -1647,9 +1647,13 @@ async function supabaseRest(table, method, query = "", body = null, prefer = nul
   const url = `${SUPABASE_URL}/rest/v1/${table}${query ? "?" + query : ""}`;
   const headers = {
     apikey: SUPABASE_SERVICE_ROLE_KEY,
-    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
     Accept: "application/json"
   };
+  // New opaque sb_secret_* keys are API keys, not JWTs, and must not be
+  // sent as Authorization: Bearer. Legacy service_role keys are JWT-based.
+  if (!SUPABASE_SERVICE_ROLE_KEY.startsWith("sb_secret_")) {
+    headers.Authorization = `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`;
+  }
   if (body !== null) headers["Content-Type"] = "application/json";
   if (prefer) headers.Prefer = prefer;
   const response = await fetch(url, {
