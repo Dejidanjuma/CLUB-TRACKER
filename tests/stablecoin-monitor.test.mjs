@@ -48,3 +48,9 @@ test("first activation establishes a current-head baseline and cursor advances o
   assert.match(source, /stablecoinLastBlock = head;[\s\S]*?persistStablecoinCheckpoint\(head \+ 1\)/);
   assert.match(source, /await scanStablecoinDeposits\(fromBlock, toBlock\);[\s\S]*?await persistStablecoinCheckpoint\(toBlock \+ 1\);[\s\S]*?stablecoinLastBlock = toBlock/);
 });
+
+test("transient RPC or token metadata failures retry without blocking the main bot startup", () => {
+  assert.match(source, /let checkpointReady = false;[\\s\\S]*?if \(!depositTokenMetadata\) await initializeDepositTokenMetadata\(\);[\\s\\S]*?checkpointReady = true;[\\s\\S]*?Initialization failed; retrying safely/);
+  assert.match(source, /runDepositMonitorLoop\(\)\.catch/);
+  assert.doesNotMatch(source, /if \(HYPER_TRANSACTION_CHAT_ID && STABLECOIN_DB_ENABLED\) \{\\s*await initializeDepositTokenMetadata\(\);/);
+});
