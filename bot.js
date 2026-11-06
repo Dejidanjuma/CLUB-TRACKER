@@ -12,7 +12,7 @@ const CHAT_ID = process.env.CHAT_ID;
 const CLUB_GROUP_CHAT_ID = process.env.CLUB_GROUP_CHAT_ID || "-1002386155004";
 const LIVE_TRADES_TOPIC_ID = 55341;
 // Separate destination: never route wallet-deposit alerts into the Live Trades topic.
-const HYPER_TRANSACTION_CHAT_ID = process.env.HYPER_TRANSACTION_CHAT_ID || null;
+const HYPER_TRANSACTION_CHAT_ID = process.env.HYPER_TRANSACTION_CHAT_ID || CHAT_ID;
 const DEPOSIT_WALLET = "0x210D9A9b9173E0691ac89D32B4EB9600464FeDEB";
 const DEPOSIT_TOKENS = {
   USDT: "0x48E722f1458b253c2FB0E573F939318D7Dbd54e7",
