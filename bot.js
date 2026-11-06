@@ -2014,9 +2014,10 @@ start();
 
 const PORT = process.env.PORT || 3000;
 const HISTORICAL_REPLAY_TX = "0x9b655d61c8696a2b471b18ab10a7e2e7a02cbe2da5f72920934af84eb936fb6a";
-let historicalReplaySent = false;
+const HISTORICAL_REPLAY_PATH = "/internal/replay-historical-usdc-credit";
+
 http.createServer(async (req, res) => {
-  if (req.method === "POST" && req.url === "/internal/replay-historical-usdc-credit") {
+  if (req.method === "POST" && req.url === HISTORICAL_REPLAY_PATH) {
     const replayKey = process.env.WALLET_INTELLIGENCE_REPLAY_KEY || "";
     const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
     const crypto = require("crypto");
@@ -2030,9 +2031,9 @@ http.createServer(async (req, res) => {
       res.end(JSON.stringify({ ok: false, error: "Unauthorized" }));
       return;
     }
-    if (historicalReplaySent) {
-      res.writeHead(409, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: "Replay already attempted in this process" }));
+    if (!STABLECOIN_DB_ENABLED) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "Durable replay audit is unavailable" }));
       return;
     }
     if (!WALLET_INTELLIGENCE_CHAT_ID) {
@@ -2040,7 +2041,37 @@ http.createServer(async (req, res) => {
       res.end(JSON.stringify({ ok: false, error: "Wallet Intelligence destination is not configured" }));
       return;
     }
-    historicalReplaySent = true;
+
+    // Reserve this exact transaction before contacting Telegram. The primary key
+    // makes the operation at-most-once across restarts and concurrent requests.
+    try {
+      const reservation = await supabaseRest(
+        "club_stablecoin_replay_attempts",
+        "POST",
+        "on_conflict=transaction_hash",
+        {
+          transaction_hash: HISTORICAL_REPLAY_TX,
+          chain_id: 52014,
+          token_symbol: "USDC",
+          amount: "2202.00",
+          destination: "WALLET_INTELLIGENCE",
+          status: "attempted",
+          attempted_at: new Date().toISOString()
+        },
+        "resolution=ignore-duplicates,return=representation"
+      );
+      if (!Array.isArray(reservation) || reservation.length !== 1) {
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "This historical transaction has already been reserved or attempted" }));
+        return;
+      }
+    } catch (error) {
+      console.error("[DEPOSIT MONITOR] Could not reserve historical replay:", error.message);
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "Durable replay reservation failed; no Telegram send attempted" }));
+      return;
+    }
+
     const message = [
       "🧪 *HISTORICAL REPLAY — TEST*",
       "",
@@ -2058,19 +2089,44 @@ http.createServer(async (req, res) => {
       "",
       "_Historical credit replayed for notification testing. No new deposit occurred._"
     ].join("\n");
+
+    let delivery = "failed";
     try {
-      const delivery = await sendTelegramPayload(WALLET_INTELLIGENCE_CHAT_ID, message, null);
-      if (delivery === "sent") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, delivery: "sent", transaction: HISTORICAL_REPLAY_TX }));
-      } else {
-        res.writeHead(202, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: false, delivery: "uncertain", transaction: HISTORICAL_REPLAY_TX }));
-      }
+      delivery = await sendTelegramPayload(WALLET_INTELLIGENCE_CHAT_ID, message, null);
     } catch (error) {
       console.error("[DEPOSIT MONITOR] Historical Telegram replay failed:", error.message);
+    }
+
+    const finalStatus = delivery === "sent" ? "sent" : delivery === "uncertain" ? "uncertain" : "failed";
+    try {
+      await supabaseRest(
+        "club_stablecoin_replay_attempts",
+        "PATCH",
+        "transaction_hash=eq." + encodeURIComponent(HISTORICAL_REPLAY_TX),
+        {
+          status: finalStatus,
+          completed_at: new Date().toISOString(),
+          telegram_chat_id: String(WALLET_INTELLIGENCE_CHAT_ID),
+          result_note: delivery === "sent" ? "Telegram API confirmed message send" :
+            delivery === "uncertain" ? "Telegram delivery outcome uncertain; automatic retry prohibited" :
+            "Telegram send failed; automatic retry prohibited"
+        },
+        "return=minimal"
+      );
+    } catch (error) {
+      // The initial reservation remains durable, so a restart cannot cause a duplicate.
+      console.error("[DEPOSIT MONITOR] Could not finalize replay audit record:", error.message);
+    }
+
+    if (delivery === "sent") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, delivery: "sent", transaction: HISTORICAL_REPLAY_TX }));
+    } else if (delivery === "uncertain") {
+      res.writeHead(202, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, delivery: "uncertain", transaction: HISTORICAL_REPLAY_TX }));
+    } else {
       res.writeHead(502, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: "Telegram delivery failed" }));
+      res.end(JSON.stringify({ ok: false, delivery: "failed", transaction: HISTORICAL_REPLAY_TX }));
     }
     return;
   }
