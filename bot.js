@@ -1986,6 +1986,18 @@ async function start() {
   if (WALLET_INTELLIGENCE_CHAT_ID && STABLECOIN_DB_ENABLED) {
     console.log(`[DEPOSIT MONITOR] Durable Supabase storage configured; initializing USDT + USDC monitoring for ${DEPOSIT_WALLET}`);
     runDepositMonitorLoop().catch((error) => console.error("[DEPOSIT MONITOR] Worker stopped:", error.message));
+    if (process.env.WALLET_INTELLIGENCE_TEST_MESSAGE === "true") {
+      try {
+        const testResult = await sendTelegramPayload(
+          WALLET_INTELLIGENCE_CHAT_ID,
+          "🧪 *WALLET INTELLIGENCE TEST*\\n\\nTelegram delivery is working. This message was sent only to the ETN WALLET INTELLIGENCE group.\\n\\nUSDT/USDC deposit monitoring is active.",
+          null
+        );
+        console.log("[DEPOSIT MONITOR] One-time Wallet Intelligence Telegram test result:", testResult);
+      } catch (error) {
+        console.error("[DEPOSIT MONITOR] One-time Telegram test failed:", error.message);
+      }
+    }
   } else if (!WALLET_INTELLIGENCE_CHAT_ID) {
     console.warn("[DEPOSIT MONITOR] Not active: Telegram destination is not configured");
   } else {
