@@ -55,3 +55,12 @@ test("transient RPC or token metadata failures retry without blocking the main b
   assert.ok(source.includes("runDepositMonitorLoop().catch"));
   assert.ok(!source.includes("await initializeDepositTokenMetadata();\n    console.log(\`[DEPOSIT MONITOR] Durable Supabase storage enabled"));
 });
+ 
+test("transient head/RPC failures do not terminate the deposit monitor worker", () => {
+  assert.match(source, /while \(true\) \{[\s\S]*?try \{[\s\S]*?const head = await provider\.getBlockNumber\(\);[\s\S]*?Poll\/scan failed; durable cursor unchanged for safe retry/);
+});
+
+test("sent-state persistence only updates columns in the dedicated deposit schema", () => {
+  assert.match(source, /alert_status: "sent",[\s\S]*?alert_error: null/);
+  assert.doesNotMatch(source, /telegram_sent_at/);
+});
