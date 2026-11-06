@@ -60,7 +60,6 @@ test("transient head/RPC failures do not terminate the deposit monitor worker", 
   assert.match(source, /while \(true\) \{[\s\S]*?try \{[\s\S]*?const head = await provider\.getBlockNumber\(\);[\s\S]*?Poll\/scan failed; durable cursor unchanged for safe retry/);
 });
 
-test("sent-state persistence only updates columns in the dedicated deposit schema", () => {
-  assert.match(source, /alert_status: "sent",[\s\S]*?alert_error: null/);
-  assert.doesNotMatch(source, /telegram_sent_at/);
+test("confirmed Telegram delivery stores its timestamp", () => {
+  assert.match(source, /alert_status: "sent",[\\s\\S]*?telegram_sent_at: new Date\(\)\.toISOString\(\)/);
 });
