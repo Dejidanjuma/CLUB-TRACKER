@@ -13,6 +13,11 @@ const CLUB_GROUP_CHAT_ID = process.env.CLUB_GROUP_CHAT_ID || "-1002386155004";
 const LIVE_TRADES_TOPIC_ID = 55341;
 // Separate destination: never route wallet-deposit alerts into the Live Trades topic.
 const HYPER_TRANSACTION_CHAT_ID = process.env.HYPER_TRANSACTION_CHAT_ID || CHAT_ID;
+const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\\/$/, "");
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const STABLECOIN_DB_ENABLED = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+const STABLECOIN_MONITOR_KEY = "electroneum:52014:" + DEPOSIT_WALLET.toLowerCase();
+const MAX_DEPOSIT_SCAN_BLOCKS = 1000;
 const DEPOSIT_WALLET = "0x210D9A9b9173E0691ac89D32B4EB9600464FeDEB";
 const DEPOSIT_TOKENS = {
   USDT: "0x48E722f1458b253c2FB0E573F939318D7Dbd54e7",
@@ -1637,12 +1642,101 @@ async function initializeDepositTokenMetadata() {
   depositTokenMetadata = metadata;
 }
 
-async function scanStablecoinDeposits(fromBlock, toBlock) {
-  if (!HYPER_TRANSACTION_CHAT_ID) {
-    console.log("[DEPOSIT MONITOR] Disabled: HYPER_TRANSACTION_CHAT_ID is not configured");
+async function supabaseRest(table, method, query = "", body = null, prefer = null) {
+  if (!STABLECOIN_DB_ENABLED) throw new Error("Supabase persistence is not configured");
+  const url = `${SUPABASE_URL}/rest/v1/${table}${query ? "?" + query : ""}`;
+  const headers = {
+    apikey: SUPABASE_SERVICE_ROLE_KEY,
+    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+    Accept: "application/json"
+  };
+  if (body !== null) headers["Content-Type"] = "application/json";
+  if (prefer) headers.Prefer = prefer;
+  const response = await fetch(url, {
+    method,
+    headers,
+    body: body === null ? undefined : JSON.stringify(body)
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`Supabase ${method} ${table} failed (${response.status}): ${text.slice(0, 500)}`);
+  }
+  return text ? JSON.parse(text) : [];
+}
+
+async function persistStablecoinCheckpoint(nextBlock) {
+  await supabaseRest(
+    "club_stablecoin_scan_checkpoints",
+    "POST",
+    "on_conflict=monitor_key",
+    {
+      monitor_key: STABLECOIN_MONITOR_KEY,
+      chain_id: 52014,
+      wallet_address: DEPOSIT_WALLET.toLowerCase(),
+      next_block: String(nextBlock),
+      updated_at: new Date().toISOString()
+    },
+    "resolution=merge-duplicates,return=minimal"
+  );
+}
+
+async function initializeStablecoinCheckpoint(head) {
+  const rows = await supabaseRest(
+    "club_stablecoin_scan_checkpoints",
+    "GET",
+    `monitor_key=eq.${encodeURIComponent(STABLECOIN_MONITOR_KEY)}&select=next_block`
+  );
+  if (rows.length) {
+    stablecoinLastBlock = Number(rows[0].next_block) - 1;
+    if (!Number.isSafeInteger(stablecoinLastBlock) || stablecoinLastBlock < 0) {
+      throw new Error("Invalid stablecoin checkpoint stored in Supabase");
+    }
+    console.log(`[DEPOSIT MONITOR] Restored durable cursor at block ${stablecoinLastBlock}`);
     return;
   }
+
+  // First activation starts at the current head; never replay old deposits.
+  stablecoinLastBlock = head;
+  await persistStablecoinCheckpoint(head + 1);
+  console.log(`[DEPOSIT MONITOR] First-run baseline stored at block ${head}; monitoring new blocks`);
+}
+
+async function getOrCreateStablecoinDeposit(record) {
+  const inserted = await supabaseRest(
+    "club_stablecoin_deposits",
+    "POST",
+    "on_conflict=chain_id,transaction_hash,log_index",
+    record,
+    "resolution=ignore-duplicates,return=representation"
+  );
+  if (inserted.length) return inserted[0];
+
+  const rows = await supabaseRest(
+    "club_stablecoin_deposits",
+    "GET",
+    `chain_id=eq.52014&transaction_hash=eq.${encodeURIComponent(record.transaction_hash)}&log_index=eq.${record.log_index}&select=alert_status,telegram_message_id`
+  );
+  return rows[0] || null;
+}
+
+async function updateStablecoinDeposit(txHash, logIndex, patch) {
+  await supabaseRest(
+    "club_stablecoin_deposits",
+    "PATCH",
+    `chain_id=eq.52014&transaction_hash=eq.${encodeURIComponent(txHash)}&log_index=eq.${logIndex}`,
+    patch,
+    "return=minimal"
+  );
+}
+
+async function scanStablecoinDeposits(fromBlock, toBlock) {
+  if (!HYPER_TRANSACTION_CHAT_ID) {
+    console.log("[DEPOSIT MONITOR] Disabled: destination chat is not configured");
+    return;
+  }
+  if (!STABLECOIN_DB_ENABLED) throw new Error("Supabase persistence is not configured");
   if (!depositTokenMetadata) throw new Error("Deposit token metadata has not been verified");
+
   const recipientTopic = walletTopicOf(DEPOSIT_WALLET);
   const logs = await provider.getLogs({
     address: Object.values(DEPOSIT_TOKENS),
@@ -1657,9 +1751,6 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
     const logIndex = Number(log.index ?? log.logIndex);
     if (!Number.isInteger(logIndex) || logIndex < 0) throw new Error("Stablecoin transfer log has no valid log index");
     const txHash = String(log.transactionHash).toLowerCase();
-    const eventKey = `52014:${txHash}:${logIndex}`;
-    if (stablecoinDepositSeen.has(eventKey)) continue;
-
     const topics = log.topics || [];
     if (topics.length < 3 || String(topics[0]).toLowerCase() !== DEPOSIT_TRANSFER_TOPIC.toLowerCase()) {
       throw new Error("Malformed ERC-20 Transfer event returned by RPC");
@@ -1670,63 +1761,95 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
     const rawAmount = BigInt(log.data);
     if (rawAmount <= 0n) continue;
 
-    // A mined log is immediately visible to the monitor; verify its receipt is successful
-    // before notifying. Only one message is sent for this event.
     const receipt = await provider.getTransactionReceipt(txHash);
     if (!receipt) throw new Error(`Receipt not yet available for detected deposit ${txHash}`);
-    if (Number(receipt.status) !== 1) {
-      stablecoinDepositSeen.add(eventKey);
-      schedulePersist();
-      continue;
-    }
+    if (Number(receipt.status) !== 1) continue;
 
+    const block = await provider.getBlock(log.blockNumber);
     const amount = ethers.formatUnits(rawAmount, token.decimals);
+    const record = {
+      chain_id: 52014,
+      transaction_hash: txHash,
+      log_index: logIndex,
+      block_number: log.blockNumber,
+      block_timestamp: block ? new Date(Number(block.timestamp) * 1000).toISOString() : null,
+      token_symbol: token.symbol,
+      token_address: token.address.toLowerCase(),
+      from_address: from.toLowerCase(),
+      to_address: to.toLowerCase(),
+      raw_amount: rawAmount.toString(),
+      token_decimals: token.decimals,
+      receipt_status: 1,
+      telegram_chat_id: String(HYPER_TRANSACTION_CHAT_ID)
+    };
+
+    const stored = await getOrCreateStablecoinDeposit(record);
+    if (!stored) throw new Error(`Could not confirm durable deposit record for ${txHash}`);
+    if (stored.alert_status === "sent" || stored.alert_status === "uncertain") continue;
+
     const message = [
       "💰 *STABLECOIN DEPOSIT DETECTED*",
       "",
       `*Asset:* ${token.symbol}`,
       `*Amount:* ${amount}`,
-      `*Network:* Electroneum Smart Chain`,
+      "*Network:* Electroneum Smart Chain",
       `*From:* \`${from}\``,
       `*To:* \`${to}\``,
       `*Block:* ${log.blockNumber}`,
       `*Transaction:* [View on Electroneum Explorer](https://blockexplorer.electroneum.com/tx/${txHash})`,
       "",
-      "_Detected by Wallet Deposit Monitor_"
-    ].join("\n");
+      "_Detected by Hyper Transaction Monitor_"
+    ].join("\\n");
 
-    await sendTelegramPayload(HYPER_TRANSACTION_CHAT_ID, message, null);
-    stablecoinDepositSeen.add(eventKey);
-    schedulePersist();
-    console.log(`[DEPOSIT MONITOR] Alert sent: ${token.symbol} ${amount} tx=${txHash} logIndex=${logIndex}`);
+    try {
+      const delivery = await sendTelegramPayload(HYPER_TRANSACTION_CHAT_ID, message, null);
+      if (delivery === "sent") {
+        await updateStablecoinDeposit(txHash, logIndex, {
+          alert_status: "sent",
+          telegram_sent_at: new Date().toISOString(),
+          alert_error: null
+        });
+        console.log(`[DEPOSIT MONITOR] Alert sent: ${token.symbol} ${amount} tx=${txHash} logIndex=${logIndex}`);
+      } else {
+        // Telegram reported uncertain delivery. Do not auto-retry and risk a duplicate.
+        await updateStablecoinDeposit(txHash, logIndex, {
+          alert_status: "uncertain",
+          alert_error: "Telegram delivery result was uncertain; automatic retry suppressed"
+        });
+        console.error(`[DEPOSIT MONITOR] Telegram delivery uncertain; retry suppressed for ${txHash}`);
+      }
+    } catch (error) {
+      await updateStablecoinDeposit(txHash, logIndex, {
+        alert_error: String(error.message || error).slice(0, 1000)
+      });
+      throw error;
+    }
   }
 }
 
 let depositMonitorRunning = false;
 
 async function runDepositMonitorLoop() {
-  if (depositMonitorRunning || !HYPER_TRANSACTION_CHAT_ID) return;
+  if (depositMonitorRunning || !HYPER_TRANSACTION_CHAT_ID || !STABLECOIN_DB_ENABLED) return;
   depositMonitorRunning = true;
   try {
+    const initialHead = await provider.getBlockNumber();
+    await initializeStablecoinCheckpoint(initialHead);
+
     while (true) {
       const head = await provider.getBlockNumber();
-      if (stablecoinLastBlock == null) {
-        // Begin from the current head on first activation; do not send historical alerts.
-        stablecoinLastBlock = head;
-        schedulePersist();
-        console.log(`[DEPOSIT MONITOR] Baseline established at block ${head}; monitoring new blocks`);
-      }
       const fromBlock = stablecoinLastBlock + 1;
       if (fromBlock > head) {
         await sleep(POLL_HEAD_MS);
         continue;
       }
+      const toBlock = Math.min(head, stablecoinLastBlock + MAX_DEPOSIT_SCAN_BLOCKS);
       try {
-        await scanStablecoinDeposits(fromBlock, head);
-        stablecoinLastBlock = head;
-        schedulePersist();
+        await scanStablecoinDeposits(fromBlock, toBlock);
+        await persistStablecoinCheckpoint(toBlock + 1);
+        stablecoinLastBlock = toBlock;
       } catch (error) {
-        console.error("[DEPOSIT MONITOR] Scan failed; cursor unchanged for safe retry:", error.message);
+        console.error("[DEPOSIT MONITOR] Scan failed; durable cursor unchanged for safe retry:", error.message);
         await sleep(SCAN_RETRY_MS);
       }
     }
@@ -1835,12 +1958,14 @@ async function start() {
   console.log("Dedupe persist: async file " + DEDUPE_STATE_PATH + " (set DEDUPE_STATE_PATH or mount /var/data for deploy-safe state)");
   loadDedupeState();
   await loadDecimals();
-  if (HYPER_TRANSACTION_CHAT_ID) {
+  if (HYPER_TRANSACTION_CHAT_ID && STABLECOIN_DB_ENABLED) {
     await initializeDepositTokenMetadata();
-    console.log(`[DEPOSIT MONITOR] Watching USDT + USDC deposits to ${DEPOSIT_WALLET}; alerts → Hyper Transaction group`);
+    console.log(`[DEPOSIT MONITOR] Durable Supabase storage enabled; watching USDT + USDC deposits to ${DEPOSIT_WALLET}`);
     runDepositMonitorLoop().catch((error) => console.error("[DEPOSIT MONITOR] Worker stopped:", error.message));
+  } else if (!HYPER_TRANSACTION_CHAT_ID) {
+    console.warn("[DEPOSIT MONITOR] Not active: Telegram destination is not configured");
   } else {
-    console.warn("[DEPOSIT MONITOR] Not active until HYPER_TRANSACTION_CHAT_ID is set in Render");
+    console.warn("[DEPOSIT MONITOR] Not active: add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to Render");
   }
   await updatePrice();
   setInterval(updatePrice, 120000);
