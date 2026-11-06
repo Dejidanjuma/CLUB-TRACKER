@@ -2018,7 +2018,7 @@ let historicalReplaySent = false;
 http.createServer(async (req, res) => {
   if (req.method === "POST" && req.url === "/internal/replay-historical-usdc-credit") {
     const replayKey = process.env.WALLET_INTELLIGENCE_REPLAY_KEY || "";
-    const supplied = String(req.headers.authorization || "").replace(/^Bearer\\s+/i, "");
+    const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
     const crypto = require("crypto");
     const expectedBuf = Buffer.from(replayKey);
     const suppliedBuf = Buffer.from(supplied);
@@ -2057,7 +2057,7 @@ http.createServer(async (req, res) => {
       "*Transaction:* [View on Electroneum Explorer](https://blockexplorer.electroneum.com/tx/" + HISTORICAL_REPLAY_TX + ")",
       "",
       "_Historical credit replayed for notification testing. No new deposit occurred._"
-    ].join("\\n");
+    ].join("\n");
     try {
       const delivery = await sendTelegramPayload(WALLET_INTELLIGENCE_CHAT_ID, message, null);
       if (delivery === "sent") {
