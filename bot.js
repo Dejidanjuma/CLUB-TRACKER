@@ -13,12 +13,12 @@ const CLUB_GROUP_CHAT_ID = process.env.CLUB_GROUP_CHAT_ID || "-1002386155004";
 const LIVE_TRADES_TOPIC_ID = 55341;
 // Separate destination: never route wallet-deposit alerts into the Live Trades topic.
 const HYPER_TRANSACTION_CHAT_ID = process.env.HYPER_TRANSACTION_CHAT_ID || CHAT_ID;
-const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\\/$/, "");
+const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const STABLECOIN_DB_ENABLED = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
-const STABLECOIN_MONITOR_KEY = "electroneum:52014:" + DEPOSIT_WALLET.toLowerCase();
 const MAX_DEPOSIT_SCAN_BLOCKS = 1000;
 const DEPOSIT_WALLET = "0x210D9A9b9173E0691ac89D32B4EB9600464FeDEB";
+const STABLECOIN_MONITOR_KEY = "electroneum:52014:" + DEPOSIT_WALLET.toLowerCase();
 const DEPOSIT_TOKENS = {
   USDT: "0x48E722f1458b253c2FB0E573F939318D7Dbd54e7",
   USDC: "0x3187deAd7A2Bd6770F5Fe81495D1B715926AAe6e"
