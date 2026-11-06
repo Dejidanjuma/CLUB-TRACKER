@@ -65,3 +65,8 @@ test("transient head/RPC failures do not terminate the deposit monitor worker", 
 test("confirmed Telegram delivery stores its timestamp", () => {
   assert.match(source, /alert_status: "sent",[\s\S]*?telegram_sent_at: new Date\(\)\.toISOString\(\)/);
 });
+
+test("deposit alert identifies Wallet Intelligence, not the trading monitor", () => {
+  assert.match(source, /Detected by Wallet Intelligence Monitor/);
+  assert.doesNotMatch(source, /Detected by Hyper Transaction Monitor/);
+});
