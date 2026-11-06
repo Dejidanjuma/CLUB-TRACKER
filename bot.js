@@ -12,7 +12,7 @@ const CHAT_ID = process.env.CHAT_ID;
 const CLUB_GROUP_CHAT_ID = process.env.CLUB_GROUP_CHAT_ID || "-1002386155004";
 const LIVE_TRADES_TOPIC_ID = 55341;
 // Separate destination: never route wallet-deposit alerts into the Live Trades topic.
-const WALLET_INTELLIGENCE_CHAT_ID = process.env.WALLET_INTELLIGENCE_CHAT_ID || CHAT_ID;
+const WALLET_INTELLIGENCE_CHAT_ID = process.env.WALLET_INTELLIGENCE_CHAT_ID;
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const STABLECOIN_DB_ENABLED = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
