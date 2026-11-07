@@ -1,0 +1,52 @@
+name: One-time historical USDC Telegram replay
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type SEND HISTORICAL TEST ALERT to authorize the one-time message'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: club-tracker-historical-usdc-replay
+  cancel-in-progress: false
+
+jobs:
+  replay:
+    if: ${{ inputs.confirm == 'SEND HISTORICAL TEST ALERT' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Validate replay secret
+        env:
+          REPLAY_KEY: ${{ secrets.WALLET_INTELLIGENCE_REPLAY_KEY }}
+        run: |
+          if [[ -z "$REPLAY_KEY" || ${#REPLAY_KEY} -lt 32 ]]; then
+            echo "::error::Repository secret WALLET_INTELLIGENCE_REPLAY_KEY is missing or too short."
+            exit 1
+          fi
+
+      - name: Send the fixed historical USDC alert once
+        env:
+          REPLAY_KEY: ${{ secrets.WALLET_INTELLIGENCE_REPLAY_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          response_file="$(mktemp)"
+          status="$(curl --silent --show-error --max-time 30 \
+            --output "$response_file" --write-out '%{http_code}' \
+            --request POST \
+            --url 'https://club-tracker-41fj.onrender.com/internal/replay-historical-usdc-credit' \
+            --header "Authorization: Bearer ${REPLAY_KEY}" \
+            --header 'Content-Type: application/json')"
+          cat "$response_file"
+          echo
+          echo "HTTP status: $status"
+          if [[ "$status" != "200" ]]; then
+            echo "::error::Replay endpoint did not confirm Telegram delivery. Do not retry automatically; inspect the durable replay audit row first."
+            exit 1
+          fi
