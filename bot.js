@@ -1663,7 +1663,7 @@ async function supabaseRest(table, method, query = "", body = null, prefer = nul
   });
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(`Supabase ${method} ${table} failed (${response.status}): ${text.slice(0, 500)}`);
+    throw new Error(`Supabase ${method} ${table} failed (${response.status})`);
   }
   return text ? JSON.parse(text) : [];
 }
