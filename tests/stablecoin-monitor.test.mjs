@@ -70,3 +70,9 @@ test("deposit alert identifies Wallet Intelligence, not the trading monitor", ()
   assert.match(source, /Detected by Wallet Intelligence Monitor/);
   assert.doesNotMatch(source, /Detected by Hyper Transaction Monitor/);
 });
+
+
+test("Supabase failures do not echo raw response bodies into logs", () => {
+  assert.match(source, /Supabase \$\{method\} \$\{table\} failed \(\$\{response\.status\}\)/);
+  assert.doesNotMatch(source, /response\.status\}: \$\{text\.slice/);
+});
