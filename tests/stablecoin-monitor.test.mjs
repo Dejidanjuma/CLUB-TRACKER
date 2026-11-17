@@ -11,10 +11,10 @@ test("monitor is pinned to Electroneum and the configured wallet", () => {
   assert.match(source, /USDC: "0x3187deAd7A2Bd6770F5Fe81495D1B715926AAe6e"/);
 });
 
-test("Supabase requests support both modern secret and legacy service-role keys", () => {
-  assert.match(source, /apikey: SUPABASE_SERVICE_ROLE_KEY/);
-  assert.match(source, /if \(!SUPABASE_SERVICE_ROLE_KEY\.startsWith\("sb_secret_"\)\)/);
-  assert.match(source, /headers\.Authorization = \`Bearer \$\{SUPABASE_SERVICE_ROLE_KEY\}\`/);
+test("deposit persistence uses local SQLite and no longer depends on Supabase", () => {
+  assert.match(source, /const \{ StablecoinStore \} = require\("\.\/stablecoin-store"\)/);
+  assert.match(source, /new StablecoinStore\(STABLECOIN_DB_PATH\)/);
+  assert.doesNotMatch(source, /SUPABASE_SERVICE_ROLE_KEY|SUPABASE_URL|supabaseRest/);
 });
 
 test("scan only queries transfers to the configured recipient", () => {
