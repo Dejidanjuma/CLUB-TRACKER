@@ -3,6 +3,7 @@ const TelegramBot = require("node-telegram-bot-api").TelegramBot;
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const { StablecoinStore } = require("./stablecoin-store");
 
 const RPC = "https://rpc.ankr.com/electroneum";
 const WETN = "0x138DAFbDA0CCB3d8E39C19edb0510Fc31b7C1c77";
@@ -13,9 +14,9 @@ const CLUB_GROUP_CHAT_ID = process.env.CLUB_GROUP_CHAT_ID || "-1002386155004";
 const LIVE_TRADES_TOPIC_ID = 55341;
 // Separate destination: never route wallet-deposit alerts into the Live Trades topic.
 const WALLET_INTELLIGENCE_CHAT_ID = process.env.WALLET_INTELLIGENCE_CHAT_ID;
-const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-const STABLECOIN_DB_ENABLED = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+const STABLECOIN_DB_PATH = process.env.STABLECOIN_DB_PATH || "/var/lib/club-tracker/club-tracker.sqlite";
+const stablecoinStore = new StablecoinStore(STABLECOIN_DB_PATH);
+const STABLECOIN_DB_ENABLED = true;
 const MAX_DEPOSIT_SCAN_BLOCKS = 1000;
 const DEPOSIT_WALLET = "0x210D9A9b9173E0691ac89D32B4EB9600464FeDEB";
 const STABLECOIN_MONITOR_KEY = "electroneum:52014:" + DEPOSIT_WALLET.toLowerCase();
@@ -1642,95 +1643,38 @@ async function initializeDepositTokenMetadata() {
   depositTokenMetadata = metadata;
 }
 
-async function supabaseRest(table, method, query = "", body = null, prefer = null) {
-  if (!STABLECOIN_DB_ENABLED) throw new Error("Supabase persistence is not configured");
-  const url = `${SUPABASE_URL}/rest/v1/${table}${query ? "?" + query : ""}`;
-  const headers = {
-    apikey: SUPABASE_SERVICE_ROLE_KEY,
-    Accept: "application/json"
-  };
-  // New opaque sb_secret_* keys are API keys, not JWTs, and must not be
-  // sent as Authorization: Bearer. Legacy service_role keys are JWT-based.
-  if (!SUPABASE_SERVICE_ROLE_KEY.startsWith("sb_secret_")) {
-    headers.Authorization = `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`;
-  }
-  if (body !== null) headers["Content-Type"] = "application/json";
-  if (prefer) headers.Prefer = prefer;
-  const response = await fetch(url, {
-    method,
-    headers,
-    body: body === null ? undefined : JSON.stringify(body)
+function persistStablecoinCheckpoint(nextBlock) {
+  stablecoinStore.saveCheckpoint({
+    monitorKey: STABLECOIN_MONITOR_KEY,
+    chainId: 52014,
+    walletAddress: DEPOSIT_WALLET,
+    nextBlock
   });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`Supabase ${method} ${table} failed (${response.status}): ${text.slice(0, 500)}`);
-  }
-  return text ? JSON.parse(text) : [];
-}
-
-async function persistStablecoinCheckpoint(nextBlock) {
-  await supabaseRest(
-    "club_stablecoin_scan_checkpoints",
-    "POST",
-    "on_conflict=monitor_key",
-    {
-      monitor_key: STABLECOIN_MONITOR_KEY,
-      chain_id: 52014,
-      wallet_address: DEPOSIT_WALLET.toLowerCase(),
-      next_block: String(nextBlock),
-      updated_at: new Date().toISOString()
-    },
-    "resolution=merge-duplicates,return=minimal"
-  );
 }
 
 async function initializeStablecoinCheckpoint(head) {
-  const rows = await supabaseRest(
-    "club_stablecoin_scan_checkpoints",
-    "GET",
-    `monitor_key=eq.${encodeURIComponent(STABLECOIN_MONITOR_KEY)}&select=next_block`
-  );
-  if (rows.length) {
-    stablecoinLastBlock = Number(rows[0].next_block) - 1;
+  const nextBlock = stablecoinStore.getCheckpoint(STABLECOIN_MONITOR_KEY);
+  if (nextBlock !== null) {
+    stablecoinLastBlock = nextBlock - 1;
     if (!Number.isSafeInteger(stablecoinLastBlock) || stablecoinLastBlock < 0) {
-      throw new Error("Invalid stablecoin checkpoint stored in Supabase");
+      throw new Error("Invalid stablecoin checkpoint stored in SQLite");
     }
-    console.log(`[DEPOSIT MONITOR] Restored durable cursor at block ${stablecoinLastBlock}`);
+    console.log(`[DEPOSIT MONITOR] Restored local durable cursor at block ${stablecoinLastBlock}`);
     return;
   }
 
   // First activation starts at the current head; never replay old deposits.
   stablecoinLastBlock = head;
-  await persistStablecoinCheckpoint(head + 1);
-  console.log(`[DEPOSIT MONITOR] First-run baseline stored at block ${head}; monitoring new blocks`);
+  persistStablecoinCheckpoint(head + 1);
+  console.log(`[DEPOSIT MONITOR] First-run local baseline stored at block ${head}; monitoring new blocks`);
 }
 
-async function getOrCreateStablecoinDeposit(record) {
-  const inserted = await supabaseRest(
-    "club_stablecoin_deposits",
-    "POST",
-    "on_conflict=chain_id,transaction_hash,log_index",
-    record,
-    "resolution=ignore-duplicates,return=representation"
-  );
-  if (inserted.length) return inserted[0];
-
-  const rows = await supabaseRest(
-    "club_stablecoin_deposits",
-    "GET",
-    `chain_id=eq.52014&transaction_hash=eq.${encodeURIComponent(record.transaction_hash)}&log_index=eq.${record.log_index}&select=alert_status,telegram_message_id`
-  );
-  return rows[0] || null;
+function getOrCreateStablecoinDeposit(record) {
+  return stablecoinStore.insertDeposit(record);
 }
 
-async function updateStablecoinDeposit(txHash, logIndex, patch) {
-  await supabaseRest(
-    "club_stablecoin_deposits",
-    "PATCH",
-    `chain_id=eq.52014&transaction_hash=eq.${encodeURIComponent(txHash)}&log_index=eq.${logIndex}`,
-    patch,
-    "return=minimal"
-  );
+function updateStablecoinDeposit(txHash, logIndex, patch) {
+  stablecoinStore.updateDeposit(txHash, logIndex, patch);
 }
 
 async function scanStablecoinDeposits(fromBlock, toBlock) {
@@ -1738,7 +1682,6 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
     console.log("[DEPOSIT MONITOR] Disabled: destination chat is not configured");
     return;
   }
-  if (!STABLECOIN_DB_ENABLED) throw new Error("Supabase persistence is not configured");
   if (!depositTokenMetadata) throw new Error("Deposit token metadata has not been verified");
 
   const recipientTopic = walletTopicOf(DEPOSIT_WALLET);
@@ -1841,7 +1784,7 @@ async function scanStablecoinDeposits(fromBlock, toBlock) {
 let depositMonitorRunning = false;
 
 async function runDepositMonitorLoop() {
-  if (depositMonitorRunning || !WALLET_INTELLIGENCE_CHAT_ID || !STABLECOIN_DB_ENABLED) return;
+  if (depositMonitorRunning || !WALLET_INTELLIGENCE_CHAT_ID) return;
   depositMonitorRunning = true;
   try {
     // Keep transient RPC/token metadata failures isolated from the main Telegram bot.
@@ -1984,7 +1927,7 @@ async function start() {
   loadDedupeState();
   await loadDecimals();
   if (WALLET_INTELLIGENCE_CHAT_ID && STABLECOIN_DB_ENABLED) {
-    console.log(`[DEPOSIT MONITOR] Durable Supabase storage configured; initializing USDT + USDC monitoring for ${DEPOSIT_WALLET}`);
+    console.log(`[DEPOSIT MONITOR] Local SQLite storage configured at ${STABLECOIN_DB_PATH}; initializing USDT + USDC monitoring for ${DEPOSIT_WALLET}`);
     runDepositMonitorLoop().catch((error) => console.error("[DEPOSIT MONITOR] Worker stopped:", error.message));
     if (process.env.WALLET_INTELLIGENCE_TEST_MESSAGE === "true") {
       try {
@@ -2000,8 +1943,6 @@ async function start() {
     }
   } else if (!WALLET_INTELLIGENCE_CHAT_ID) {
     console.warn("[DEPOSIT MONITOR] Not active: Telegram destination is not configured");
-  } else {
-    console.warn("[DEPOSIT MONITOR] Not active: add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to Render");
   }
   await updatePrice();
   setInterval(updatePrice, 120000);
@@ -2018,116 +1959,9 @@ const HISTORICAL_REPLAY_PATH = "/internal/replay-historical-usdc-credit";
 
 http.createServer(async (req, res) => {
   if (req.method === "POST" && req.url === HISTORICAL_REPLAY_PATH) {
-    const replayKey = process.env.WALLET_INTELLIGENCE_REPLAY_KEY || "";
-    const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-    const crypto = require("crypto");
-    const expectedBuf = Buffer.from(replayKey);
-    const suppliedBuf = Buffer.from(supplied);
-    const authorized = replayKey.length >= 32 &&
-      expectedBuf.length === suppliedBuf.length &&
-      crypto.timingSafeEqual(expectedBuf, suppliedBuf);
-    if (!authorized) {
-      res.writeHead(401, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: "Unauthorized" }));
-      return;
-    }
-    if (!STABLECOIN_DB_ENABLED) {
-      res.writeHead(503, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: "Durable replay audit is unavailable" }));
-      return;
-    }
-    if (!WALLET_INTELLIGENCE_CHAT_ID) {
-      res.writeHead(503, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: "Wallet Intelligence destination is not configured" }));
-      return;
-    }
-
-    // Reserve this exact transaction before contacting Telegram. The primary key
-    // makes the operation at-most-once across restarts and concurrent requests.
-    try {
-      const reservation = await supabaseRest(
-        "club_stablecoin_replay_attempts",
-        "POST",
-        "on_conflict=transaction_hash",
-        {
-          transaction_hash: HISTORICAL_REPLAY_TX,
-          chain_id: 52014,
-          token_symbol: "USDC",
-          amount: "2202.00",
-          destination: "WALLET_INTELLIGENCE",
-          status: "attempted",
-          attempted_at: new Date().toISOString()
-        },
-        "resolution=ignore-duplicates,return=representation"
-      );
-      if (!Array.isArray(reservation) || reservation.length !== 1) {
-        res.writeHead(409, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: false, error: "This historical transaction has already been reserved or attempted" }));
-        return;
-      }
-    } catch (error) {
-      console.error("[DEPOSIT MONITOR] Could not reserve historical replay:", error.message);
-      res.writeHead(503, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: "Durable replay reservation failed; no Telegram send attempted" }));
-      return;
-    }
-
-    const message = [
-      "🧪 *HISTORICAL REPLAY — TEST*",
-      "",
-      "💰 *WALLET INTELLIGENCE — STABLECOIN CREDIT*",
-      "",
-      "*Asset:* USDC",
-      "*Amount:* 2,202.00 USDC",
-      "*Network:* Electroneum Smart Chain",
-      "*Credit type:* Mint (zero-address Transfer)",
-      "*Date:* 4 November 2026, 14:33:15 UTC",
-      "*Block:* 16,738,852",
-      "*From:* \`0x0000000000000000000000000000000000000000\`",
-      "*To:* \`0x210D9A9b9173E0691ac89D32B4EB9600464FeDEB\`",
-      "*Transaction:* [View on Electroneum Explorer](https://blockexplorer.electroneum.com/tx/" + HISTORICAL_REPLAY_TX + ")",
-      "",
-      "_Historical credit replayed for notification testing. No new deposit occurred._"
-    ].join("\n");
-
-    let delivery = "failed";
-    try {
-      delivery = await sendTelegramPayload(WALLET_INTELLIGENCE_CHAT_ID, message, null);
-    } catch (error) {
-      console.error("[DEPOSIT MONITOR] Historical Telegram replay failed:", error.message);
-    }
-
-    const finalStatus = delivery === "sent" ? "sent" : delivery === "uncertain" ? "uncertain" : "failed";
-    try {
-      await supabaseRest(
-        "club_stablecoin_replay_attempts",
-        "PATCH",
-        "transaction_hash=eq." + encodeURIComponent(HISTORICAL_REPLAY_TX),
-        {
-          status: finalStatus,
-          completed_at: new Date().toISOString(),
-          telegram_chat_id: String(WALLET_INTELLIGENCE_CHAT_ID),
-          result_note: delivery === "sent" ? "Telegram API confirmed message send" :
-            delivery === "uncertain" ? "Telegram delivery outcome uncertain; automatic retry prohibited" :
-            "Telegram send failed; automatic retry prohibited"
-        },
-        "return=minimal"
-      );
-    } catch (error) {
-      // The initial reservation remains durable, so a restart cannot cause a duplicate.
-      console.error("[DEPOSIT MONITOR] Could not finalize replay audit record:", error.message);
-    }
-
-    if (delivery === "sent") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, delivery: "sent", transaction: HISTORICAL_REPLAY_TX }));
-    } else if (delivery === "uncertain") {
-      res.writeHead(202, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, delivery: "uncertain", transaction: HISTORICAL_REPLAY_TX }));
-    } else {
-      res.writeHead(502, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, delivery: "failed", transaction: HISTORICAL_REPLAY_TX }));
-    }
+    // Historical replay is intentionally disabled during the persistence migration.
+    res.writeHead(410, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: false, error: "Historical replay is disabled" }));
     return;
   }
   res.writeHead(200, { "Content-Type": "text/plain" });
