@@ -28,8 +28,8 @@ test("only successful transaction receipts can become deposit records", () => {
 });
 
 test("deposit records are idempotent by chain, transaction and log index", () => {
-  assert.match(source, /on_conflict=chain_id,transaction_hash,log_index/);
-  assert.match(source, /resolution=ignore-duplicates,return=representation/);
+  assert.match(source, /stablecoinStore\.insertDeposit\(record\)/);
+  assert.match(source, /PRIMARY KEY \(chain_id, transaction_hash, log_index\)/);
 });
 
 test("alerts are durably claimed and terminal states suppress duplicates", () => {
@@ -43,7 +43,7 @@ test("deposit alerts use only the dedicated Wallet Intelligence group and never 
   assert.match(source, /WALLET_INTELLIGENCE_CHAT_ID = process\.env\.WALLET_INTELLIGENCE_CHAT_ID/);
   assert.doesNotMatch(source, /WALLET_INTELLIGENCE_CHAT_ID = process\.env\.WALLET_INTELLIGENCE_CHAT_ID \|\|/);
   assert.match(source, /sendTelegramPayload\(WALLET_INTELLIGENCE_CHAT_ID, message, null\)/);
-  assert.match(source, /if \(depositMonitorRunning \|\| !WALLET_INTELLIGENCE_CHAT_ID \|\| !STABLECOIN_DB_ENABLED\) return/);
+  assert.match(source, /if \(depositMonitorRunning \|\| !WALLET_INTELLIGENCE_CHAT_ID\) return/);
 });
 
 test("first activation establishes a current-head baseline and cursor advances only after scan", () => {
