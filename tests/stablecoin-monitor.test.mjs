@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 const source = fs.readFileSync(new URL("../bot.js", import.meta.url), "utf8");
+const storeSource = fs.readFileSync(new URL("../stablecoin-store.js", import.meta.url), "utf8");
 
 test("monitor is pinned to Electroneum and the configured wallet", () => {
   assert.match(source, /chainId: 52014/);
@@ -29,7 +30,7 @@ test("only successful transaction receipts can become deposit records", () => {
 
 test("deposit records are idempotent by chain, transaction and log index", () => {
   assert.match(source, /stablecoinStore\.insertDeposit\(record\)/);
-  assert.match(source, /PRIMARY KEY \(chain_id, transaction_hash, log_index\)/);
+  assert.match(storeSource, /PRIMARY KEY \(chain_id, transaction_hash, log_index\)/);
 });
 
 test("alerts are durably claimed and terminal states suppress duplicates", () => {
